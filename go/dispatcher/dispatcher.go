@@ -8,8 +8,9 @@ import (
 	"eva-hub/filler"
 	"log"
 	"net"
+	"path/filepath"
 	"sync"
-	"sync/atomic" // 🔧 ADDED: For thread-safe counters
+	"sync/atomic"
 	"time"
 )
 
@@ -53,7 +54,7 @@ func StartSTTEventListener(address string) error {
 	if err != nil {
 		return err
 	}
-	log.Printf("[DISPATCHER] TCP Listener started on %s", address)
+	log.Printf("[DISPATCHER] 👂 TCP Listener started on %s", address)
 
 	// 🔧 START MONITOR
 	startTelemetryLogger()
@@ -106,16 +107,18 @@ func ProcessEvent(data []byte) {
 	start := time.Now()
 	var event STTEvent
 	if err := json.Unmarshal(data, &event); err != nil {
+		log.Printf("[DISPATCHER] ❌ JSON Decode Error: %v", err)
 		return
 	}
 
 	// 🔧 FIX: Execute blocking tasks in Goroutines to keep the Dispatcher listening
+	// Event names aligned with Python `engine.py` and `stt_event_emitter.py`
 	switch event.Type {
-	case "WAKE_ONLY":
+	case "wake_ack": // Was "WAKE_ONLY"
 		go handleWakeOnly(event, start)
-	case "reflex_action_done":
+	case "reflex_action": // Was "reflex_action_done"
 		go handleReflexDone(event, start)
-	case "stt_final":
+	case "command": // Was "stt_final"
 		go handleCommand(event, start)
 	case "play_file":
 		// 🔧 CRITICAL: Must be async so we can receive "stop_audio" while playing
@@ -123,7 +126,7 @@ func ProcessEvent(data []byte) {
 	case "stop_audio":
 		// 🔧 STOP MUST BE SYNC OR HIGH PRIORITY
 		handleStopAudio(event)
-	case "play_dynamic_filler":
+	case "play_dynamic": // Was "play_dynamic_filler"
 		go handlePlayDynamic(event)
 	case "calibration_cmd":
 		log.Printf("[DISPATCHER] 🔧 Forwarding Calibration Command to Sat %d", event.SatID)
@@ -134,7 +137,8 @@ func ProcessEvent(data []byte) {
 }
 
 func handleWakeOnly(event STTEvent, start time.Time) {
-	log.Printf("[MONITOR] ⚡ Wake Ack (Latency: %v) -> SILENT (Trusting ESP)", time.Since(start))
+	// ESP32 handles the "Ding" locally now, so this is mostly for logging
+	// log.Printf("[MONITOR] ⚡ Wake Ack (Latency: %v) -> SILENT (Trusting ESP)", time.Since(start))
 }
 
 func handleReflexDone(event STTEvent, start time.Time) {
@@ -147,6 +151,7 @@ func handleReflexDone(event STTEvent, start time.Time) {
 	}
 
 	// 2. Play Acknowledgement Sound Immediately
+	// This uses the 'filler' package to pick a random confirmation sound
 	filler.PlayAckActionDone(event.SatID)
 }
 
@@ -165,9 +170,15 @@ func handlePlayFile(event STTEvent, start time.Time) {
 		return
 	}
 	path := pathRaw.(string)
-	log.Printf("[TTS] Playing generated file: %s", path)
 
-	downlink.PlayAudio(event.SatID, path)
+	// Use filepath.Base for cleaner logs (e.g., "response_123.wav" instead of "/full/path/...")
+	log.Printf("[TTS] 🗣️ Playing Generated Response: %s", filepath.Base(path))
+
+	// Calls the robust Downlink engine we fixed in the previous step
+	err := downlink.PlayAudio(event.SatID, path)
+	if err != nil {
+		log.Printf("[DISPATCHER] ❌ Audio Playback Failed: %v", err)
+	}
 }
 
 func handlePlayDynamic(event STTEvent) {
@@ -177,8 +188,10 @@ func handlePlayDynamic(event STTEvent) {
 	}
 	filename := filenameRaw.(string)
 
-	log.Printf("[CACHE] Playing Dynamic Filler: %s", filename)
-	filler.PlayDynamicFiller(event.SatID, filename)
+	log.Printf("[CACHE] 🎭 Playing Dynamic Filler: %s", filename)
+
+	// Fillers are small, cached audio files for latency masking
+	filler.PlayDynamic(event.SatID, filename)
 }
 
 // ✅ HANDLER: BARGE-IN (HUB SIDE ONLY)

@@ -1,131 +1,96 @@
 package filler
 
 import (
-    "encoding/binary"
-    "errors"
-    "eva-hub/downlink"
-    "io/ioutil"
-    "log"
-    "math/rand"
-    "os"
-    "path/filepath"
-    "strings"
-    "time"
+	"errors"
+	"eva-hub/downlink"
+	"log"
+	"math/rand"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
 )
 
 // Category defines the folder name in assets/fillers/
 type Category string
 
 const (
-    AckActionDone Category = "action"
-    DynamicFiller Category = "dynamic"
+	AckActionDone Category = "action"
+	DynamicFiller Category = "dynamic"
 )
 
-// 🔧 FIX 1: USE RELATIVE PATH (Linux/Windows Compatible)
+// 🔧 PATH CONFIGURATION
 // Assumes you run the binary from the project root (syntheta-hub/)
-var basePath = "./assets/fillers"
+var basePath = "assets/fillers"
 
 func init() {
-    rand.Seed(time.Now().UnixNano())
+	rand.Seed(time.Now().UnixNano())
 }
 
-func Pick(category Category) (string, error) {
-    dir := filepath.Join(basePath, string(category))
-
-    if category == DynamicFiller {
-        os.MkdirAll(dir, 0755)
-    }
-
-    entries, err := os.ReadDir(dir)
-    if err != nil {
-        return "", err
-    }
-
-    var wavs []string
-    for _, e := range entries {
-        if e.IsDir() {
-            continue
-        }
-        name := e.Name()
-        if strings.HasSuffix(strings.ToLower(name), ".wav") {
-            wavs = append(wavs, filepath.Join(dir, name))
-        }
-    }
-
-    if len(wavs) == 0 {
-        return "", errors.New("no wav files found in " + dir)
-    }
-
-    return wavs[rand.Intn(len(wavs))], nil
-}
-
+// PlayAckActionDone plays a random sound from assets/fillers/action/
 func PlayAckActionDone(satID int) {
-    playCategory(satID, AckActionDone)
+	playCategory(satID, AckActionDone)
 }
 
-func PlayDynamicFiller(satID int, filename string) error {
-    path := filepath.Join(basePath, "dynamic", filename)
-    return playSafe(satID, path)
+// PlayDynamic plays a specific named file from assets/fillers/dynamic/
+// 🟢 FIX 1: Renamed from 'PlayDynamicFiller' to match Dispatcher call
+func PlayDynamic(satID int, filename string) error {
+	// Security: Prevent directory traversal
+	cleanName := filepath.Base(filename)
+	path := filepath.Join(basePath, "dynamic", cleanName)
+
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		log.Printf("[FILLER] ⚠️ Dynamic Filler not found: %s", path)
+		return err
+	}
+
+	return playSafe(satID, path)
 }
+
+// --- INTERNAL HELPERS ---
 
 func playCategory(satID int, cat Category) {
-    path, err := Pick(cat)
-    if err != nil {
-        return
-    }
-    playSafe(satID, path)
+	path, err := pickRandom(cat)
+	if err != nil {
+		// It's common for folders to be empty initially, so we just return silently
+		return
+	}
+	playSafe(satID, path)
 }
 
 func playSafe(satID int, path string) error {
-    log.Printf("[FILLER] sat=%d STREAMING ASSET %s\n", satID, filepath.Base(path))
+	log.Printf("[FILLER] 🎭 Sat %d -> Asset: %s", satID, filepath.Base(path))
 
-    fileBytes, err := ioutil.ReadFile(path)
-    if err != nil {
-        log.Printf("[FILLER] Error reading asset: %v", err)
-        return err
-    }
-
-    pcmData := parseWavBytes(fileBytes)
-    if pcmData == nil {
-        log.Printf("[FILLER] Invalid WAV format: %s", path)
-        return errors.New("invalid wav")
-    }
-
-    downlink.PlayPCM(satID, pcmData)
-    return nil
+	// 🟢 OPTIMIZATION:
+	// We delegate the heavy lifting to the Downlink engine.
+	// It already knows how to read WAV headers, resample, and stream.
+	return downlink.PlayAudio(satID, path)
 }
 
-// Helper: Convert arbitrary WAV bytes to Syntheta Standard PCM (16k MONO)
-func parseWavBytes(raw []byte) []byte {
-    if len(raw) < 44 {
-        return nil
-    }
-    numChannels := binary.LittleEndian.Uint16(raw[22:24])
-    sampleRate := binary.LittleEndian.Uint32(raw[24:28])
+func pickRandom(category Category) (string, error) {
+	dir := filepath.Join(basePath, string(category))
 
-    // Find data chunk
-    dataStart := 0
-    for i := 12; i < len(raw)-8; i++ {
-        if raw[i] == 'd' && raw[i+1] == 'a' && raw[i+2] == 't' && raw[i+3] == 'a' {
-            dataStart = i + 8
-            break
-        }
-    }
-    if dataStart == 0 {
-        dataStart = 44
-    }
-    pcmData := raw[dataStart:]
+	// Create directory if it doesn't exist (prevents crashes)
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		os.MkdirAll(dir, 0755)
+		return "", errors.New("directory created, empty")
+	}
 
-    inputSamples := downlink.BytesToInt16(pcmData)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", err
+	}
 
-    // 🔧 FIX 2: FORCE MONO (Matches player.go logic)
-    if numChannels == 2 {
-        inputSamples = downlink.StereoToMono(inputSamples)
-    }
-    
-    if sampleRate != 16000 {
-        inputSamples = downlink.Resample(inputSamples, int(sampleRate), 16000)
-    }
+	var wavs []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(strings.ToLower(e.Name()), ".wav") {
+			wavs = append(wavs, filepath.Join(dir, e.Name()))
+		}
+	}
 
-    return downlink.Int16ToBytes(inputSamples)
+	if len(wavs) == 0 {
+		return "", errors.New("no wav files found")
+	}
+
+	return wavs[rand.Intn(len(wavs))], nil
 }

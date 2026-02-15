@@ -11,10 +11,14 @@ import (
 	"time"
 )
 
-// --- GLOBAL SERVER INSTANCE ---
-var GlobalSatServer *SatelliteServer
+// --- GLOBAL STATE ---
+var (
+	GlobalSatServer *SatelliteServer
+	streamMu        sync.RWMutex
+	activeStreams   = make(map[int]context.CancelFunc)
+)
 
-// SatelliteServer handles UDP audio streams and playback routing
+// SatelliteServer handles UDP audio routing and learned IP mapping
 type SatelliteServer struct {
 	audioListener    *net.UDPConn
 	activeSatellites map[int]*net.UDPAddr // Maps SatID -> IP/Port
@@ -30,7 +34,7 @@ func NewSatelliteServer() *SatelliteServer {
 	return server
 }
 
-// StartAudioServer listens for incoming UDP audio (Lane 1)
+// StartAudioServer listens for incoming UDP audio and learns routes
 func (s *SatelliteServer) StartAudioServer(address string) {
 	addr, err := net.ResolveUDPAddr("udp", address)
 	if err != nil {
@@ -45,6 +49,14 @@ func (s *SatelliteServer) StartAudioServer(address string) {
 	s.audioListener = conn
 	log.Printf("[DOWNLINK] 🚀 Audio Relay Listening on %s", address)
 
+	// 🔧 ROUTE UPDATE: Aligning with Router Network (192.168.1.x)
+	s.mu.Lock()
+	if manualAddr, err := net.ResolveUDPAddr("udp", "192.168.1.103:5555"); err == nil {
+		s.activeSatellites[1] = manualAddr
+		log.Printf("[DOWNLINK] 🔧 STATIC ROUTE ESTABLISHED: Sat 1 -> %s", manualAddr.String())
+	}
+	s.mu.Unlock()
+
 	buffer := make([]byte, 2048)
 	pythonAddr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:6000")
 
@@ -54,22 +66,15 @@ func (s *SatelliteServer) StartAudioServer(address string) {
 			continue
 		}
 
-		// 🟢 FIX 1: THE SILENT HANDSHAKE
-		// We process ANY packet (n >= 1) to learn the IP.
-		// Even a 1-byte "Ping" allows us to register the route.
 		if n >= 1 {
 			satID := int(buffer[0])
-
-			// 🧠 LEARN ROUTE: Map SatID to IP
 			s.mu.Lock()
-			// Log only on change to avoid spam
 			if existing, ok := s.activeSatellites[satID]; !ok || existing.String() != remoteAddr.String() {
 				log.Printf("[DOWNLINK] 📡 Learned Route: Sat %d -> %s", satID, remoteAddr.String())
 			}
 			s.activeSatellites[satID] = remoteAddr
 			s.mu.Unlock()
 
-			// 🚀 FORWARDING: Only forward ACTUAL AUDIO (payload > 0) to Python
 			if n > 1 {
 				conn.WriteToUDP(buffer[:n], pythonAddr)
 			}
@@ -77,21 +82,10 @@ func (s *SatelliteServer) StartAudioServer(address string) {
 	}
 }
 
-// StartControlServer Stub (Legacy Compatibility)
 func (s *SatelliteServer) StartControlServer(address string) {
 	log.Printf("[DOWNLINK] ⚠️ Control Server (TCP) is managed by Python directly. This is a stub.")
 }
 
-// =========================================================================
-//  ⏯️ AUDIO PLAYER ENGINE (Multi-Node & Cancellable)
-// =========================================================================
-
-var (
-	streamMu      sync.RWMutex
-	activeStreams = make(map[int]context.CancelFunc)
-)
-
-// StopPlayback immediately kills the audio stream for a SPECIFIC satellite
 func StopPlayback(satID int) {
 	streamMu.Lock()
 	defer streamMu.Unlock()
@@ -103,7 +97,7 @@ func StopPlayback(satID int) {
 	}
 }
 
-// PlayAudio loads a WAV, processes it, streams it, and deletes it.
+// PlayAudio processes a WAV file and streams it to the satellite
 func PlayAudio(satID int, filepath string) error {
 	defer func() {
 		log.Printf("[DOWNLINK] Cleaning up temp file: %s", filepath)
@@ -122,13 +116,14 @@ func PlayAudio(satID int, filepath string) error {
 		return err
 	}
 
-	// 1. Parse Header
 	if len(raw) < 44 {
 		return nil
 	}
+
 	numChannels := binary.LittleEndian.Uint16(raw[22:24])
 	sampleRate := binary.LittleEndian.Uint32(raw[24:28])
 
+	// Find 'data' chunk
 	dataStart := 0
 	for i := 12; i < len(raw)-8; i++ {
 		if raw[i] == 'd' && raw[i+1] == 'a' && raw[i+2] == 't' && raw[i+3] == 'a' {
@@ -146,7 +141,7 @@ func PlayAudio(satID int, filepath string) error {
 	pcmData := raw[dataStart:]
 	inputSamples := BytesToInt16(pcmData)
 
-	// 2. Audio Hygiene: Force 16k Mono
+	// Audio Hygiene
 	if numChannels == 2 {
 		inputSamples = StereoToMono(inputSamples)
 	}
@@ -154,10 +149,12 @@ func PlayAudio(satID int, filepath string) error {
 		inputSamples = Resample(inputSamples, int(sampleRate), 16000)
 	}
 
-	// 3. Volume & Byte Conversion
-	finalBytes := ReduceVolumeToBytes(inputSamples, 0.3)
+	// 🔉 50% VOLUME ALIGNMENT: Matching successful test script gain
+	for i := range inputSamples {
+		inputSamples[i] = int16(float64(inputSamples[i]) * 0.5)
+	}
+	finalBytes := Int16ToBytes(inputSamples)
 
-	// 4. Register Stream
 	streamMu.Lock()
 	if cancel, exists := activeStreams[satID]; exists {
 		cancel()
@@ -166,22 +163,21 @@ func PlayAudio(satID int, filepath string) error {
 	activeStreams[satID] = cancel
 	streamMu.Unlock()
 
-	// 5. Stream
-	streamBytesCancellable(ctx, satID, finalBytes)
+	completed := streamBytesCancellable(ctx, satID, finalBytes)
 
-	// Cleanup
 	streamMu.Lock()
 	delete(activeStreams, satID)
 	streamMu.Unlock()
+
+	if completed {
+		SendPlaybackEnd(satID)
+	}
+
 	return nil
 }
 
-// PlayPCM plays raw bytes (Cancellable) - Used by filler/beeps
+// PlayPCM plays raw bytes directly
 func PlayPCM(satID int, data []byte) error {
-	// Assume data is already 16k Mono
-	samples := BytesToInt16(data)
-	quieterData := ReduceVolumeToBytes(samples, 0.3)
-
 	streamMu.Lock()
 	if cancel, exists := activeStreams[satID]; exists {
 		cancel()
@@ -190,15 +186,20 @@ func PlayPCM(satID int, data []byte) error {
 	activeStreams[satID] = cancel
 	streamMu.Unlock()
 
-	streamBytesCancellable(ctx, satID, quieterData)
+	// No gain reduction here either
+	completed := streamBytesCancellable(ctx, satID, data)
 
 	streamMu.Lock()
 	delete(activeStreams, satID)
 	streamMu.Unlock()
+
+	if completed {
+		SendPlaybackEnd(satID)
+	}
 	return nil
 }
 
-// --- CORE STREAMING LOOP (TUNED PHYSICS) ---
+// streamBytesCancellable: THE "ALMOST SMOOTH" STEADY-STATE SYNC
 func streamBytesCancellable(ctx context.Context, satID int, data []byte) bool {
 	if GlobalSatServer == nil {
 		return false
@@ -210,55 +211,69 @@ func streamBytesCancellable(ctx context.Context, satID int, data []byte) bool {
 	GlobalSatServer.mu.RUnlock()
 
 	if !exists || targetAddr == nil || listener == nil {
-		log.Printf("[DOWNLINK] ❌ Cannot stream: SatID %d unknown (No route learned yet).", satID)
+		log.Printf("[DOWNLINK] ❌ Cannot stream: SatID %d unknown.", satID)
 		return false
 	}
 
-	// 🟢 PHYSICS MATCH: Tuned to your Python Script
-	// 1024 bytes = 32ms of audio @ 16kHz
 	chunkSize := 1024
+	padding := make([]byte, chunkSize)
 
-	// Python Script: 30ms Sleep
-	// This leaves ~2ms of headroom per packet to prevent buffer overflow
-	sleepDuration := 30 * time.Millisecond
+	log.Printf("[DOWNLINK] 🚀 Streaming %d bytes (Golden 31.2ms Pace)...", len(data))
 
-	log.Printf("[DOWNLINK] 🚀 Streaming %d bytes to %s...", len(data), targetAddr.String())
+	// 🟢 STEP 1: ROBUST WAKE-UP (15 Packets)
+	// Sending 15 packets of silence to ensure the hardware is fully "awake"
+	for k := 0; k < 15; k++ {
+		if listener != nil {
+			listener.WriteToUDP(padding, targetAddr)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	time.Sleep(50 * time.Millisecond)
 
-	for i := 0; i < len(data); i += chunkSize {
-		// 1. Check Cancel
+	// 🟢 STEP 2: PRECISE STEADY STREAMING
+	// Using 31.2ms to keep the ESP32 buffer "fat" but not overflowing
+	pace := 31200 * time.Microsecond
+	ticker := time.NewTicker(pace)
+	defer ticker.Stop()
+
+	ptr := 0
+	for ptr < len(data) {
 		select {
 		case <-ctx.Done():
 			log.Printf("[DOWNLINK] 🛑 Stream cancelled for Sat %d", satID)
 			return false
-		default:
-		}
+		case <-ticker.C:
+			// Prepare Chunk
+			end := ptr + chunkSize
+			var chunk []byte
+			if end > len(data) {
+				// Final chunk padding
+				lastChunk := data[ptr:]
+				copy(padding, lastChunk)
+				for k := len(lastChunk); k < chunkSize; k++ {
+					padding[k] = 0
+				}
+				chunk = padding
+			} else {
+				chunk = data[ptr:end]
+			}
 
-		// 2. Prepare Chunk
-		end := i + chunkSize
-		if end > len(data) {
-			end = len(data)
+			// Send Packet
+			if listener != nil {
+				listener.WriteToUDP(chunk, targetAddr)
+			}
+			ptr += chunkSize
 		}
-		chunk := data[i:end]
-
-		// 🟢 PADDING FIX: Ensure every packet is exactly 1024 bytes
-		// Some ESP32 DMA/I2S implementations glitch on variable sized packets
-		if len(chunk) < chunkSize {
-			padding := make([]byte, chunkSize-len(chunk))
-			chunk = append(chunk, padding...)
-		}
-
-		// 3. Send
-		if listener != nil {
-			listener.WriteToUDP(chunk, targetAddr)
-		}
-
-		// 4. Steady Drip
-		time.Sleep(sleepDuration)
 	}
+
 	return true
 }
 
-// --- HELPERS ---
+func SendPlaybackEnd(satID int) {
+	log.Printf("[DOWNLINK] ✅ Playback Finished for Sat %d", satID)
+}
+
+// --- HELPERS (Keep as is) ---
 
 func StereoToMono(input []int16) []int16 {
 	output := make([]int16, len(input)/2)
@@ -293,15 +308,6 @@ func BytesToInt16(data []byte) []int16 {
 		out[i] = int16(binary.LittleEndian.Uint16(data[i*2:]))
 	}
 	return out
-}
-
-func ReduceVolumeToBytes(samples []int16, scale float32) []byte {
-	buf := make([]byte, len(samples)*2)
-	for i, sample := range samples {
-		scaled := int16(float32(sample) * scale)
-		binary.LittleEndian.PutUint16(buf[i*2:], uint16(scaled))
-	}
-	return buf
 }
 
 func Int16ToBytes(data []int16) []byte {
