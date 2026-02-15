@@ -1,0 +1,176 @@
+{
+  "commands": [
+    {
+      "comment": "================ 🏠 APPLIANCE CONTROL (GENERAL) ================"
+    },
+    {
+      "id": "LIGHT_ON_LIVING",
+      "type": "ha",
+      "mode": "normal",
+      "phrases": ["turn on living room light", "lights on in living room", "living room lights on"],
+      "strict_aliases": ["living room on", "lights on living"],
+      "payload": { "domain": "light", "service": "turn_on", "entity": "light.living_room" },
+      "reply_template": "Living room lights on."
+    },
+    {
+      "id": "LIGHT_OFF_LIVING",
+      "type": "ha",
+      "mode": "normal",
+      "phrases": ["turn off living room light", "lights off in living room", "living room lights off"],
+      "strict_aliases": ["living room off", "lights off living"],
+      "payload": { "domain": "light", "service": "turn_off", "entity": "light.living_room" },
+      "reply_template": "Living room lights off."
+    },
+    {
+      "id": "FAN_ON_BEDROOM",
+      "type": "ha",
+      "mode": "normal",
+      "phrases": ["turn on the bedroom fan", "start the fan", "it's hot in here"],
+      "strict_aliases": ["fan on", "bedroom fan on"],
+      "payload": { "domain": "fan", "service": "turn_on", "entity": "fan.bedroom" },
+      "reply_template": "Bedroom fan started."
+    },
+    {
+      "id": "FAN_OFF_BEDROOM",
+      "type": "ha",
+      "mode": "normal",
+      "phrases": ["turn off the bedroom fan", "stop the fan", "it's too cold"],
+      "strict_aliases": ["fan off", "bedroom fan off"],
+      "payload": { "domain": "fan", "service": "turn_off", "entity": "fan.bedroom" },
+      "reply_template": "Bedroom fan stopped."
+    },
+    {
+      "id": "AC_SET_TEMP",
+      "type": "ha",
+      "mode": "normal",
+      "phrases": ["set ac to 24", "make it 24 degrees", "change temperature to 24"],
+      "payload": { "domain": "climate", "service": "set_temperature", "entity": "climate.main_ac", "temp": 24 },
+      "reply_template": "AC set to 24 degrees."
+    },
+    {
+      "id": "TV_ON",
+      "type": "ha",
+      "mode": "normal",
+      "phrases": ["turn on the tv", "start the television", "let's watch something"],
+      "strict_aliases": ["tv on"],
+      "payload": { "domain": "media_player", "service": "turn_on", "entity": "media_player.living_room_tv" },
+      "reply_template": "TV is on."
+    },
+
+    {
+      "comment": "================ 🤖 SYSTEM REFLEXES (UNIVERSAL) ================"
+    },
+    {
+      "id": "STOP",
+      "type": "sys",
+      "mode": "normal",
+      "phrases": ["stop", "stop talking", "shut up", "cancel", "terminate", "quiet"],
+      "strict_aliases": ["stop", "shut up", "silence", "quiet", "cancel", "halt"],
+      "payload": { "action": "stop_audio" },
+      "reply_template": "Stopped."
+    },
+    {
+      "id": "CONFIRM_YES",
+      "type": "sys",
+      "mode": "normal",
+      "phrases": ["yes", "yeah", "yep", "sure", "do it", "correct", "please", "go ahead"],
+      "strict_aliases": ["yes", "y", "ok", "okay", "sure", "do it"],
+      "payload": { "action": "confirm_yes" },
+      "reply_template": "Okay."
+    },
+    {
+      "id": "CONFIRM_NO",
+      "type": "sys",
+      "mode": "normal",
+      "phrases": ["no", "nope", "wrong", "don't", "cancel", "nevermind"],
+      "strict_aliases": ["no", "n", "nope", "cancel", "abort"],
+      "payload": { "action": "confirm_no" },
+      "reply_template": "Cancelled."
+    },
+    {
+      "id": "CONVERSATION_MODE",
+      "type": "sys",
+      "mode": "normal",
+      "phrases": ["let's chat", "can we talk", "conversation mode", "i want to discuss something"],
+      "strict_aliases": ["chat mode", "let's talk"],
+      "payload": { "action": "enter_chat" },
+      "reply_template": "I'm listening."
+    },
+    {
+      "id": "UPDATE_MACRO",
+      "type": "sys",
+      "mode": "normal",
+      "phrases": ["update system", "start calibration", "fix audio", "maintenance mode"],
+      "strict_aliases": ["update system", "calibrate"],
+      "payload": { "action": "run_update_macro" },
+      "reply_template": "Starting system maintenance."
+    },
+
+    {
+      "comment": "================ 🔐 SUDO ZONE (RESTRICTED) ================"
+    },
+    {
+      "id": "SUDO_ACCESS",
+      "type": "sys",
+      "mode": "normal",
+      "phrases": ["sudo access", "admin mode", "root access"],
+      "strict_aliases": ["sudo access", "root"],
+      "payload": { "action": "trigger_sudo_challenge" },
+      "reply_template": "Security Challenge Initiated."
+    },
+    {
+      "id": "SUDO_LOGIN",
+      "type": "sys",
+      "mode": "sudo_challenge",
+      "phrases": ["sudo login"],
+      "strict_aliases": ["sudo login"],
+      "payload": { "action": "verify_sudo_login" },
+      "reply_template": "Verifying Environment..."
+    },
+    {
+      "id": "SUDO_REBOOT",
+      "type": "sudo",
+      "mode": "sudo",
+      "phrases": ["system reboot", "reboot the core", "restart syntheta"],
+      "strict_aliases": ["system reboot", "reboot"],
+      "payload": { "action": "reboot_host" },
+      "reply_template": "Rebooting Host Machine."
+    },
+    {
+      "id": "SUDO_SHUTDOWN",
+      "type": "sudo",
+      "mode": "sudo",
+      "phrases": ["system shutdown", "power off", "kill power"],
+      "strict_aliases": ["system shutdown", "shutdown"],
+      "payload": { "action": "shutdown_host" },
+      "reply_template": "Powering down."
+    },
+    {
+      "id": "SUDO_UPDATE_CODE",
+      "type": "sudo",
+      "mode": "sudo",
+      "phrases": ["force update", "git pull", "update software"],
+      "strict_aliases": ["force update", "update code"],
+      "payload": { "action": "git_pull_rebuild" },
+      "reply_template": "Executing Force Update."
+    },
+    {
+      "id": "SUDO_WIPE_MEMORY",
+      "type": "sudo",
+      "mode": "sudo",
+      "phrases": ["wipe memory", "clear context", "forget everything"],
+      "strict_aliases": ["wipe memory", "format brain"],
+      "payload": { "action": "clear_context" },
+      "reply_template": "Memory Wiped."
+    },
+    {
+      "id": "SUDO_EXIT",
+      "type": "sudo",
+      "mode": "sudo",
+      "phrases": ["exit sudo", "close root", "return to normal"],
+      "strict_aliases": ["exit", "quit", "logout"],
+      "payload": { "action": "exit_sudo" },
+      "reply_template": "Exiting Sudo Mode."
+    }
+  ]
+}

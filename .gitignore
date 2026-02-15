@@ -1,0 +1,9 @@
+# 1. Ignore EVERYTHING
+
+venv/
+assets/
+__pycache__/
+*.pyc
+.DS_Store
+piper
+
