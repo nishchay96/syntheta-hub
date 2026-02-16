@@ -1,8 +1,8 @@
-import subprocess
 import logging
 import sys
 import os
 import json
+import requests  # 🚀 High-speed API communication
 
 # 🔧 IMPORT DATA MODELS
 sys.path.append(os.path.join(os.path.dirname(__file__), '../../'))
@@ -11,49 +11,44 @@ from core.data_models import GoldenPacket
 logger = logging.getLogger("LLM")
 
 # ⚙️ CONFIGURATION
-# Matches the model name you successfully ran in terminal
-MODEL_NAME = "llama3.2" 
+# Optimized model name pointing to your GPU-locked Modelfile
+MODEL_NAME = "syntheta-brain" 
+OLLAMA_API_URL = "http://localhost:11434/api/generate"
 
 class OllamaBridge:
     def __init__(self):
-        logger.info(f"LLM Bridge Init | Unified Core: {MODEL_NAME} (CLI Mode)")
+        # 🟢 UPDATED: Persistent API Mode for sub-3s response
+        logger.info(f"LLM Bridge Init | Unified Core: {MODEL_NAME} (Persistent API Mode)")
 
-    def _call_ollama_cli(self, prompt, system_prompt):
+    def _call_ollama_api(self, prompt, system_prompt):
         """
-        Uses the native Linux 'ollama run' command via subprocess.
-        This bypasses HTTP networking issues.
+        🚀 LATENCY FIX: Replaces CLI Subprocess with persistent HTTP API calls.
+        Keeps the model 'warm' in VRAM for near-instant inference.
         """
+        payload = {
+            "model": MODEL_NAME,
+            "prompt": f"{system_prompt}\n\nUser: {prompt}\nAssistant:",
+            "stream": False,  # Full sentence delivery for optimal TTS timing
+            "options": {
+                "num_predict": 100,
+                "temperature": 0.7,
+                "top_p": 0.9
+            }
+        }
+        
         try:
-            # Construct a single prompt block because CLI arguments are simple strings
-            # We force the System Prompt structure manually
-            full_prompt = (
-                f"{system_prompt}\n\n"
-                f"User: {prompt}\n"
-                f"Assistant:"
-            )
+            # 🎯 11434 is the default Ollama API port
+            response = requests.post(OLLAMA_API_URL, json=payload, timeout=15)
+            response.raise_for_status()
             
-            # Run the command: ollama run <model> <prompt>
-            # capture_output=True grabs stdout (the answer)
-            result = subprocess.run(
-                ["ollama", "run", MODEL_NAME, full_prompt],
-                capture_output=True,
-                text=True,
-                encoding='utf-8',
-                check=True  # Raises CalledProcessError if return code != 0
-            )
-            
-            # Clean up the output
-            response = result.stdout.strip()
-            return response
+            result = response.json()
+            return result.get("response", "").strip()
 
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Ollama CLI Error (Exit Code {e.returncode}): {e.stderr}")
-            return None
-        except FileNotFoundError:
-            logger.error("❌ CRITICAL: 'ollama' command not found. Is it installed and in PATH?")
+        except requests.exceptions.RequestException as e:
+            logger.error(f"❌ Ollama API Error: {e}")
             return None
         except Exception as e:
-            logger.error(f"Unknown Subprocess Error: {e}")
+            logger.error(f"Unknown API Error: {e}")
             return None
 
     def generate_slm_prompt(self, packet: GoldenPacket) -> str:
@@ -83,7 +78,6 @@ class OllamaBridge:
     def generate(self, packet: GoldenPacket):
         """
         Unified Processing: Logic + Personality in one shot.
-        Replaces old 'think' method.
         """
         # 1. Build the Dynamic System Prompt
         system_instruction = self.generate_slm_prompt(packet)
@@ -93,8 +87,8 @@ class OllamaBridge:
 
         logger.info(f"[LLM] Processing Packet: '{user_text}' | Context: {packet.get('ctx', 'unknown')}")
         
-        # 3. Call Ollama via CLI
-        response = self._call_ollama_cli(user_text, system_instruction)
+        # 3. Call Ollama via API (Hardware-accelerated)
+        response = self._call_ollama_api(user_text, system_instruction)
         
         if not response:
             return "I'm having trouble connecting to my brain."
@@ -111,9 +105,8 @@ class OllamaBridge:
         # Convert list context to string
         history_str = ""
         if isinstance(context, list):
-            for item in context[-3:]: # Take last 3
+            for item in context[-3:]: # Take last 3 turns
                 if isinstance(item, dict):
-                    # Try to extract content safely
                     role = item.get('role', 'user')
                     content = item.get('content', '') or item.get('text', '')
                     history_str += f"{role}: {content}\n"

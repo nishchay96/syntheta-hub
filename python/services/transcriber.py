@@ -2,12 +2,16 @@ import logging
 import os
 import numpy as np
 from faster_whisper import WhisperModel
-from .config import WHISPER_PROMPT  # 🟢 OPTIMIZED: Changed to relative import
+from .config import WHISPER_PROMPT
 
 logger = logging.getLogger("Whisper")
 
 class AudioTranscriber:
-    def __init__(self, model_size="base.en", device="cpu"):
+    def __init__(self, model_size="base.en", device="cuda"):
+        """
+        🚀 LATENCY FIX: Migrated from 'cpu' to 'cuda' (GPU).
+        Switched compute_type to 'float16' for optimized NVIDIA performance.
+        """
         # 1. Calculate Path to Offline Model
         base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../'))
         model_path = os.path.join(base_dir, "assets", "models", "whisper-base-en")
@@ -17,13 +21,21 @@ class AudioTranscriber:
         try:
             # 2. Check if local model exists
             if os.path.exists(model_path) and os.listdir(model_path):
-                # Load from LOCAL folder
-                self.model = WhisperModel(model_path, device=device, compute_type="int8")
-                logger.info("✅ Whisper Loaded Successfully (Offline Mode).")
+                # 🟢 OPTIMIZED: Loaded on GPU with float16 precision
+                self.model = WhisperModel(
+                    model_path, 
+                    device=device, 
+                    compute_type="float16"
+                )
+                logger.info("✅ Whisper Loaded Successfully on GPU (Offline Mode).")
             else:
-                # Fallback to default cache (Will fail if offline)
+                # Fallback to default cache
                 logger.warning(f"⚠️ Local model not found at {model_path}. Trying default cache...")
-                self.model = WhisperModel(model_size, device=device, compute_type="int8")
+                self.model = WhisperModel(
+                    model_size, 
+                    device=device, 
+                    compute_type="float16"
+                )
                 
         except Exception as e:
             logger.critical(f"Failed to load Whisper: {e}")
@@ -45,9 +57,7 @@ class AudioTranscriber:
             audio_np, 
             beam_size=5, 
             language="en", 
-            # 🟢 OPTIMIZED: Disabled redundant internal VAD. 
-            # Alpha manages pauses natively; Gatekeeper manages session validity.
-            vad_filter=False,
+            vad_filter=False, # Alpha/Gatekeeper manage timing
             initial_prompt=WHISPER_PROMPT 
         )
         

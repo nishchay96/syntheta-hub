@@ -12,13 +12,11 @@ import random
 # ============================================
 # 🔧 SERVICE IMPORTS (ROBUST PATHING)
 # ============================================
-# 1. Calculate the Root Folders
-current_dir = os.path.dirname(os.path.abspath(__file__))      # .../python/services
-python_root = os.path.abspath(os.path.join(current_dir, '..')) # .../python
-hub_root = os.path.abspath(os.path.join(python_root, '..'))    # .../syntheta-hub
-audio_lib_dir = os.path.join(python_root, 'audio')             # .../python/audio
+current_dir = os.path.dirname(os.path.abspath(__file__))
+python_root = os.path.abspath(os.path.join(current_dir, '..'))
+hub_root = os.path.abspath(os.path.join(python_root, '..'))
+audio_lib_dir = os.path.join(python_root, 'audio')
 
-# 2. Force-Insert Paths to System (Priority 0)
 if audio_lib_dir not in sys.path:
     sys.path.insert(0, audio_lib_dir)
 if python_root not in sys.path:
@@ -26,7 +24,6 @@ if python_root not in sys.path:
 if hub_root not in sys.path:
     sys.path.insert(0, hub_root)
 
-# 3. Import Core Modules
 try:
     from stt_event_emitter import STTEventEmitter
 except ImportError:
@@ -39,10 +36,7 @@ from core.gatekeeper import AudioGatekeeper
 from nlu.llm_bridge import OllamaBridge
 from nlu.semantic_brain import SemanticBrain 
 from core.pi_manager import PiManager
-
-# 🟢 FIX: Import StateManager from the CURRENT directory (.)
 from .state_manager import EngineState
-
 from .smart_tts_cache import SmartTTSCache 
 from .transcriber import AudioTranscriber
 from .config import *
@@ -61,7 +55,6 @@ SESSION_IDLE_TIMEOUT = 10.0
 WAKE_COLLISION_SKIP_BYTES = 16000 
 PCM_BYTES_PER_SEC = 32000
 UDP_PAYLOAD_SIZE = 1024 
-
 GHOST_STREAM_LIMIT_SEC = 5.0 
 PACKETS_PER_SEC = PCM_BYTES_PER_SEC / UDP_PAYLOAD_SIZE
 
@@ -84,7 +77,6 @@ class SynthetaEngine:
     def __init__(self, state_manager, pi_manager):
         logger.info("⚡ Initializing Syntheta Engine (Omega v2.5 - Cognitive)...")
         
-        # 🟢 DEPENDENCY INJECTION (Single Source of Truth)
         self.state = state_manager
         self.pi = pi_manager
         self.comms = None 
@@ -92,7 +84,7 @@ class SynthetaEngine:
         self.ha = HomeAssistantClient(HA_TOKEN, HA_URL)
         self.emitter = STTEventEmitter()
         
-        self.transcriber = AudioTranscriber(MODEL_SIZE, device="cpu")
+        self.transcriber = AudioTranscriber(MODEL_SIZE, device="cuda")
         self.brain = SemanticBrain() 
         self.llm = OllamaBridge()
         self.gatekeeper = AudioGatekeeper()
@@ -112,6 +104,9 @@ class SynthetaEngine:
         self.pending_sudo_cmd = None
         self.hallucinations = list(DEFAULT_HALLUCINATIONS)
         self.ghost_counters = {} 
+
+        # 🟢 NEW: Multi-Node Silent Wake Timers
+        self.wwd_timers = {} 
         
         threading.Thread(target=self._processing_loop, daemon=True).start()
         threading.Thread(target=self._monitor_loop, daemon=True).start()
@@ -134,7 +129,13 @@ class SynthetaEngine:
     # =========================================
     def on_hardware_wake(self, sat_id, payload=None):
         logger.info(f">>> ⚡ HARDWARE WAKE: Satellite {sat_id}")
-        
+
+        # 🟢 STEP 1: KILL PENDING UN-MUTE TIMER (Interruption Safety)
+        if sat_id in self.wwd_timers:
+            self.wwd_timers[sat_id].cancel()
+            del self.wwd_timers[sat_id]
+            logger.info(f"🚫 Canceled Un-mute timer for Sat {sat_id} due to interruption.")
+
         self.state.snapshot_playback(sat_id)
         self.state.session_origins[sat_id] = "barge_in"
         self.ghost_counters[sat_id] = 0
@@ -145,9 +146,8 @@ class SynthetaEngine:
         self.state.deaf_until = 0.0
         self.state.skip_byte_counter = WAKE_COLLISION_SKIP_BYTES
         self.state.audio_buffers[sat_id] = b""
-        
         self.state.session_start_time = time.time()
-        self.state.is_conversation = False 
+        self.state.is_conversation = False
         self.state.last_active_time[sat_id] = time.time()
         self.state.session_mode[sat_id] = "LISTENING"
         
@@ -162,7 +162,7 @@ class SynthetaEngine:
             try: 
                 self.state.audio_queue.put_nowait((sat_id, pcm))
             except Exception as e:
-                logger.error(f"❌ Queue Full/Error: {e}") 
+                logger.error(f"❌ Queue Full/Error: {e}")
 
     def flush_audio(self, sat_id):
         logger.info(f"🚀 Hardware Trigger: Flushing Buffer for Sat {sat_id}")
@@ -186,24 +186,19 @@ class SynthetaEngine:
         while True:
             time.sleep(0.5)
             now = time.time()
-            
             if self.security_mode == "SUDO_CHALLENGE":
                 if now > self.sudo_challenge_deadline:
                     logger.info("🚫 Sudo Challenge Expired.")
                     self.security_mode = "NORMAL"
-                    self._speak(1, "Login timeout.") 
-
+                    self._speak(1, "Login timeout.")
             for sat_id, mode in list(self.state.session_mode.items()):
                 if mode != "LISTENING": continue
                 if self.security_mode == "SUDO_SESSION": continue
-
                 limit = LIMIT_CONVERSATION if getattr(self.state, 'is_conversation', False) else LIMIT_REFLEX
                 start_time = getattr(self.state, 'session_start_time', now)
-                
                 if (now - start_time) > limit:
                       self._close_session(sat_id)
                       continue
-
                 last_active = self.state.last_active_time.get(sat_id, now)
                 if (now - last_active) > SESSION_IDLE_TIMEOUT:
                     self._close_session(sat_id)
@@ -212,7 +207,7 @@ class SynthetaEngine:
         while True:
             if self.security_mode == "SUDO_SESSION":
                 if self.comms: self.comms.send_keep_alive(1)
-            time.sleep(25) 
+            time.sleep(25)
 
     def _close_session(self, sat_id):
         self.state.session_mode[sat_id] = "IDLE"
@@ -223,83 +218,93 @@ class SynthetaEngine:
     # =========================================
     def _process_audio_chunk(self, sat_id, pcm):
         if time.time() < self.state.deaf_until: return
-        
         if hasattr(self.state, 'skip_byte_counter') and self.state.skip_byte_counter > 0:
             skip_amount = min(len(pcm), self.state.skip_byte_counter)
             self.state.skip_byte_counter -= skip_amount
             if skip_amount == len(pcm): return
             pcm = pcm[skip_amount:]
-
         if sat_id not in self.state.audio_buffers:
             self.state.audio_buffers[sat_id] = b""
         self.state.audio_buffers[sat_id] += pcm
 
     def _transcribe(self, sat_id):
         audio_data = self.state.audio_buffers.get(sat_id, b"")[:]
-        
         self.state.audio_buffers[sat_id] = b""
-        
-        if len(audio_data) < 3200: 
+        if len(audio_data) < 3200:
             logger.warning(f"⚠️ Buffer too short to transcribe ({len(audio_data)} bytes)")
             return
-
         if not self.gatekeeper.is_speech(sat_id, audio_data):
             logger.warning(f"🛡️ False Wake Rejected [Sat {sat_id}]. Audio below calibrated threshold.")
             self._close_session(sat_id)
             return
-
         threading.Thread(target=self._run_pipeline, args=(sat_id, audio_data)).start()
 
     def _run_pipeline(self, sat_id, audio_bytes):
         text, confidence = self.transcriber.transcribe(audio_bytes)
-
         if len(text) < 2 or confidence < 0.4: return
         if text.lower() in self.hallucinations: return
-            
         logger.info(f">>> 📝 INPUT: '{text}' (Conf: {confidence:.2f}) [Mode: {self.security_mode}]")
-        
         self.state.last_active_time[sat_id] = time.time()
-
         if self.security_mode == "SUDO_CHALLENGE":
             if "sudo login" in text.lower():
                 self._enter_sudo_calibration(sat_id)
             else:
                 logger.info("🔒 Ignored input during Sudo Challenge.")
             return
-
         if self.security_mode == "SUDO_SESSION":
             self._handle_sudo_command(sat_id, text)
             return
-
         self._handle_normal_command(sat_id, text)
 
     # =========================================
     #  LOGIC HANDLERS (THE BRAIN)
     # =========================================
-
     def _handle_normal_command(self, sat_id, text):
+        # RESUME POLICY HANDLER
+        if self.state.resume_pending.get(sat_id):
+             if "yes" in text.lower() or "continue" in text.lower():
+                  self.handle_resume_confirmation(sat_id, True)
+                  return
+             elif "no" in text.lower() or "stop" in text.lower():
+                  self.handle_resume_confirmation(sat_id, False)
+                  return
+
         plan = self.pi.process_query(sat_id, text)
-        
         if plan and plan.get("intent") == "SUDO_ACCESS":
             self.security_mode = "SUDO_CHALLENGE"
             self.sudo_challenge_deadline = time.time() + 15.0
             self._speak(sat_id, "Did you mean Sudo Access? Say Sudo Login to confirm.")
             return
-
         if plan and plan.get("intent") != "unknown":
             self._execute_plan(sat_id, plan)
             return
-            
         self.state.is_conversation = True
-        processed = self.brain.process(text) 
-        
+        processed = self.brain.process(text)
         self.state.update_context(sat_id, processed['input'], processed['entities'])
         packet = self.state.build_golden_packet(sat_id, processed['input'], processed.get('emotion', 'neutral'))
-        
         llm_response = self.llm.generate(packet)
         self.state.commit_assistant_response(sat_id, llm_response)
-        
         self._speak(sat_id, llm_response)
+
+    def handle_resume_confirmation(self, sat_id, confirmed=True):
+        if not confirmed:
+            self.state.reset_interruption(sat_id)
+            self._speak(sat_id, "Okay, stopped.")
+            return
+
+        interrupted = self.state.interrupted_state.get(sat_id)
+        if not interrupted: return
+
+        # 🟢 Create clipped segment for resume
+        resume_file_path = create_resume_file(
+            interrupted["file"], 
+            interrupted["seconds_played"], 
+            rewind_sec=2.0
+        )
+
+        if resume_file_path:
+            self._speak_file(sat_id, resume_file_path)
+            self.state.reset_interruption(sat_id)
 
     def _handle_sudo_command(self, sat_id, text):
         clean = text.lower().strip()
@@ -307,7 +312,6 @@ class SynthetaEngine:
             self.security_mode = "NORMAL"
             self._speak(sat_id, "Exiting Sudo Mode.")
             return
-
         if self.pending_sudo_cmd:
             if clean == self.pending_sudo_cmd:
                 self._speak(sat_id, "Executing.")
@@ -317,7 +321,6 @@ class SynthetaEngine:
                 self._speak(sat_id, "Mismatch. Command cancelled.")
                 self.pending_sudo_cmd = None
             return
-
         if "reboot" in clean:
             self.pending_sudo_cmd = "reboot"
             self._speak(sat_id, "Confirm Reboot.")
@@ -352,14 +355,11 @@ class SynthetaEngine:
     # =========================================
     def _execute_plan(self, sat_id, plan):
         if plan.get("intent") == "STOP":
-             self._close_session(sat_id) 
+             self._close_session(sat_id)
              return
-
         if plan.get("execute"):
             self.ha.execute(plan["execute"])
-
         force_listen = plan.get("force_listen", False)
-
         if plan.get("speak"):
             self._speak(sat_id, plan["speak"], force_listen)
         elif force_listen and self.comms:
@@ -378,15 +378,26 @@ class SynthetaEngine:
 
     def _speak_file(self, sat_id, path, force_listen=False):
         if not path or not os.path.exists(path): return
+        
+        # 🟢 STEP 1: CALCULATE MASTER TIMER (Duration + 2s Margin)
+        duration = self.state.get_wav_duration(path)
+        silent_zone = duration + 2.0
 
-        final_path = pad_audio_file(path, silence_ms=150)
-        self.state.track_playback(sat_id, final_path)
-        
-        duration = self.state.get_wav_duration(final_path)
-        self.state.deaf_until = time.time() + duration + 0.2 
-        
+        # 🟢 STEP 2: TOGGLE SILENT WWD ON ALPHA
+        if self.comms:
+            self.comms.send_command(sat_id, {"cmd": "wwd_mode", "value": "silent"})
+
+        # 🟢 STEP 3: SCHEDULE UN-MUTE (Master Timer)
+        if sat_id in self.wwd_timers: self.wwd_timers[sat_id].cancel()
+        self.wwd_timers[sat_id] = threading.Timer(silent_zone, 
+            lambda: self.comms.send_command(sat_id, {"cmd": "wwd_mode", "value": "normal"}))
+        self.wwd_timers[sat_id].start()
+
+        # 🟢 STEP 4: TRACK & PLAY
+        self.state.track_playback(sat_id, path)
+        self.state.deaf_until = time.time() + duration + 0.2
         logger.info(f"🔈 Handing off playback to Go Bridge for Sat {sat_id}")
-        self.emitter.emit("play_file", sat_id, {"filepath": final_path})
+        self.emitter.emit("play_file", sat_id, {"filepath": path})
         
         if force_listen and self.comms:
             logger.info(f"🎤 Scheduling Remote Mic Open (force_listen) for Sat {sat_id} in {duration:.2f}s")

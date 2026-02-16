@@ -1,5 +1,6 @@
 import time
 import logging
+from collections import deque
 import sys
 import os
 
@@ -8,6 +9,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from nlu.semantic_brain import SemanticBrain
 
 # ==================== CONFIGURATION ====================
+# Thresholds for intent classification
 THRESH_CLEAN = 0.80 
 THRESH_BARGE = 0.90
 THRESH_CONTEXT = 0.60
@@ -28,7 +30,7 @@ class PiManager:
         self.logger = logging.getLogger("Brain")
         self.reflex_brain = SemanticBrain()
         
-        # self.history removed (Redundancy Fix)
+        # Internal state tracking per satellite node
         self.current_session_id = {}       
         self.session_start_time = {}       
         self.last_interaction_time = {}    
@@ -38,7 +40,7 @@ class PiManager:
         self.active_context_batches = {}   
 
     def _init_sat_state(self, sat_id):
-        # Only init flags, not memory
+        """Internal helper to initialize node-specific flags."""
         if sat_id not in self.last_interaction_time:
             self.last_interaction_time[sat_id] = 0
             self.is_engaged[sat_id] = False
@@ -47,6 +49,7 @@ class PiManager:
             self.active_context_batches[sat_id] = None
 
     def start_new_session(self, sat_id, session_id=None):
+        """Coordinates session initialization with Hardware Wake events."""
         self._init_sat_state(sat_id)
         now = time.time()
         time_since_last = now - self.last_interaction_time.get(sat_id, 0)
@@ -54,17 +57,21 @@ class PiManager:
         self.current_session_id[sat_id] = session_id
         self.session_start_time[sat_id] = now
         
+        # If idle for >15s, clear volatile state but keep engine memory (State Manager)
         if time_since_last > 15.0:
             self.pending_action[sat_id] = None
             self.active_context_batches[sat_id] = None
             self.is_engaged[sat_id] = False
-            # Note: We do not wipe engine memory here; we let the engine handle its own buffer limits.
             self.logger.info(f"[Pi] Session (Sat {sat_id}): Fresh Start.")
         else:
             self.is_engaged[sat_id] = True
             self.logger.info(f"[Pi] Session (Sat {sat_id}): Conversation Continued.")
 
     def process_query(self, sat_id, text, mode="clean", interrupted_context=None):
+        """
+        The Main Decision Loop.
+        Routes text between Reflex (Local) and Cognitive (LLM) layers.
+        """
         self._init_sat_state(sat_id)
         self.last_interaction_time[sat_id] = time.time()
         
@@ -73,27 +80,27 @@ class PiManager:
 
         self.logger.info(f"[Pi] Sat {sat_id} Processing: '{text}' | Mode: {mode.upper()}")
 
-        # 1. 🟢 SINGLE SOURCE OF TRUTH: Push to Engine State immediately
-        # This replaces self.history.append
+        # 1. 🟢 UPDATE CONTEXT (Single Source of Truth)
+        # We push to StateManager so all services (LLM, Brain) see the same history
         self.engine.update_context(sat_id, user_text=text, new_entities={})
 
-        # 2. 🟢 RETRIEVE CONTEXT: Pull fresh history for the Reflex Brain
-        # Helper to map 'content' (State) -> 'text' (Reflex expected format)
+        # 2. 🟢 CONTEXT MAPPING
+        # Map Engine 'content' format to the 'text' format expected by SemanticBrain
         raw_history = self.engine.get_recent_context(sat_id)
         reflex_context = [{"role": h["role"], "text": h["content"]} for h in raw_history]
 
         current_threshold = THRESH_CLEAN if mode == "clean" else THRESH_BARGE
         
         # ============================================
-        # ⚡ LAYER 0: CONTEXTUAL OVER-RULE (Refined)
+        # ⚡ LAYER 0: CONTEXTUAL CONFIRMATION
+        # Handles user replies to 'Should I do X?'
         # ============================================
         if self.pending_action.get(sat_id):
             self.logger.info(f"⚡ Waiting for confirmation from Sat {sat_id}...")
             
-            # 1. Generate Dynamic Intent Keyword
+            # Generate Dynamic Intent Keywords for matching
             keyword = self.pending_action[sat_id]['intent'].replace("_", " ").lower()
             
-            # 2. Tripartite Batches
             current_batches = {
                 "positive": [keyword, "yes", f"yes {keyword}", f"{keyword} on", "proceed", "do it"],
                 "negative": ["no", "dont", f"no {keyword}", "stop", "cancel", "nevermind"]
@@ -114,15 +121,15 @@ class PiManager:
                     return {"speak": "Okay, I won't do that.", "session_policy": "reflex"}
 
             if max(pos_score, neg_score) < 0.50:
-                self.logger.info("🔄 Non-confirmation detected. Resetting for fresh process.")
+                self.logger.info("🔄 Non-confirmation detected. Resetting context.")
                 self.pending_action[sat_id] = None
-                # Continue to Layer 1...
 
         # ============================================
-        # LAYER 1: REFLEX BRAIN (Standard Commands)
+        # 🟢 LAYER 1: REFLEX BRAIN (Local Intent)
         # ============================================
-        # Uses the synchronized reflex_context from EngineState
         reflex_result = self.reflex_brain.infer_intent(text, context=reflex_context, threshold=0.35)
+        
+        # Check if the phrasing sounds like a control command to prevent LLM hallucination
         is_command_phrasing = text.lower().startswith(("turn on", "turn off", "switch", "set", "enable", "disable", "stop"))
         
         plan = None 
@@ -164,15 +171,22 @@ class PiManager:
             
             self.logger.info("[Pi] Reflex failed. Handing off to Cognitive Engine...")
             self.is_engaged[sat_id] = True 
-            return None # Yields to engine.py for LLM
+            return None # Returns None to signal engine.py to use LLM
 
         # ============================================
         # 🔧 LAYER 3: INTERRUPTION RECOVERY
         # ============================================
+        # This logic handles the "Silent Wake" transition 
+        # when a user interrupts a long TTS playback.
         if interrupted_context and plan:
             if plan.get("source") == "reflex" and plan.get("intent") not in ["STOP", "CONFIRM_NO", "CONFIRM_YES"]:
+                # 🟢 RESUME HANDSHAKE:
+                # We append the resume question to the reflex response.
                 topic = interrupted_context.get("topic_keyword", "that")
-                plan["speak"] = f"{plan.get('speak', '')} ... Should we continue about {topic}?"
+                plan["speak"] = f"{plan.get('speak', '')} ... Should we continue with {topic}?"
                 plan["force_listen"] = True
+                
+                # Signal the state manager that we are waiting for a 'Yes/No'
+                self.engine.resume_pending[sat_id] = True
 
         return plan

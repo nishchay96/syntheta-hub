@@ -10,13 +10,13 @@
 cd "$(dirname "$0")" || exit 1
 HUB_ROOT=$(pwd)
 
-# 2. FIND PYTHON INTERPRETER
+# 2. FIND PYTHON INTERPRETER (Strict Priority for Latency)
 # Matches logic in launcher.py to ensure consistent execution
 HUB_PY_DIR="$HUB_ROOT/python"
 HUB_PY_EXE=""
 
 find_python() {
-    # A. Check Audio Venv (Highest Priority)
+    # A. Check Audio Venv (Highest Priority - Contains CUDA/GPU libs)
     if [ -x "$HUB_PY_DIR/audio/venv/bin/python" ]; then
         echo "$HUB_PY_DIR/audio/venv/bin/python"
         return
@@ -28,14 +28,9 @@ find_python() {
         return
     fi
     
-    # C. Fallback to System
+    # C. Fallback to System (Slowest path)
     if command -v python3 &> /dev/null; then
         command -v python3
-        return
-    fi
-    
-    if command -v python &> /dev/null; then
-        command -v python
         return
     fi
 }
@@ -45,18 +40,17 @@ HUB_PY_EXE=$(find_python)
 # 3. VALIDATE PYTHON
 if [ -z "$HUB_PY_EXE" ]; then
     echo "[CRITICAL] No Python interpreter found!"
-    echo "Please install python3 or create a venv in python/audio/venv/"
+    echo "Please ensure the venv is created in python/audio/venv/ for GPU support."
     exit 1
 fi
 
 # 4. PRE-FLIGHT CHECKS
 if [ ! -f "launcher.py" ]; then
     echo "[CRITICAL] launcher.py not found in $HUB_ROOT"
-    echo "Make sure you run this script from the syntheta-hub folder."
     exit 1
 fi
 
-# Auto-fix permissions
+# Ensure correct execution permissions for the optimized engine
 chmod +x launcher.py 2>/dev/null
 chmod +x "$HUB_PY_DIR/main.py" 2>/dev/null
 
@@ -66,7 +60,7 @@ echo "[LOADER] Using Python: $HUB_PY_EXE"
 echo "[LOADER] Starting Syntheta Launcher..."
 echo "------------------------------------------"
 
-# Execute the launcher, passing any args
+# Execute the launcher, passing all arguments to the Sovereign Bootloader
 "$HUB_PY_EXE" launcher.py "$@"
 EXIT_CODE=$?
 

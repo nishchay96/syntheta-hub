@@ -12,7 +12,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 # 🔧 PHASE 3: IMPORT CORE MANAGERS
 from core.pi_manager import PiManager
 
-# 🟢 FIX: Import from the correct 'services' folder, NOT 'audio/services'
+# 🟢 FIX: Import from the correct 'services' folder
 from services.state_manager import EngineState
 
 # Import your custom engine
@@ -114,13 +114,17 @@ if __name__ == "__main__":
 
     except Exception as e:
         print(f"❌ CRITICAL: Engine Init Failed: {e}")
-        # traceback.print_exc() # Uncomment for debug
         sys.exit(1)
 
     # 2. Init Comms (TCP 5556 - The Key to ESP32)
     try:
         # This starts the TCP listener immediately
         comms = SatelliteNetManager(engine)
+        
+        # 🟢 CRITICAL FIX: Inject Comms back into Engine
+        # This closes the loop so Engine can send commands to Satellites
+        engine.comms = comms 
+        
         print("✅ Network Manager Initialized (TCP 5556 / UDP 5555).")
         
         DiscoveryService(port=6002).start()
@@ -132,7 +136,8 @@ if __name__ == "__main__":
     # 3. Bind UDP Audio Port (UDP 6000 - The Audio Pipe)
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 65535)
+        # Increase buffer to prevent packet drops on high-load
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 65535 * 4)
         sock.bind(("0.0.0.0", 6000))
         print("✅ UDP Audio Socket Bound (Port 6000)")
     except Exception as e:
@@ -142,7 +147,13 @@ if __name__ == "__main__":
     # 4. Audio Ingestion Loop
     print("✅ System Ready. Listening...")
     
-    raw_buffers = {}
+    # Pre-allocate buffer for Satellite 1 to avoid repeated dict lookups
+    sat_id = 1
+    engine_queue = engine.queue_audio # Optimization: cache function reference
+    
+    # Raw buffer for accumulating chunks
+    buffer = bytearray()
+    
     stat_start_time = time.time()
     stat_rx_packets = 0
     stat_bytes_total = 0
@@ -151,12 +162,12 @@ if __name__ == "__main__":
         while True:
             # A. RECEIVE
             try:
-                data, addr = sock.recvfrom(65535)
+                data, addr = sock.recvfrom(4096) # Standard MTU is 1500, safe upper bound
             except OSError as e:
                 logger.warning(f"UDP Recv Error: {e}")
                 continue
             
-            # B. MONITOR
+            # B. MONITOR (Every 5s)
             stat_rx_packets += 1
             stat_bytes_total += len(data)
             
@@ -165,28 +176,25 @@ if __name__ == "__main__":
                 elapsed = now - stat_start_time
                 rx_pps = stat_rx_packets / elapsed
                 kbps = (stat_bytes_total * 8) / 1000 / elapsed
-                print(f" [📊 MONITOR] Ingest: {rx_pps:.1f} pps ({kbps:.1f} kbps)")
+                # Only print if there is actual traffic to reduce log spam
+                if rx_pps > 1.0:
+                    print(f" [📊 MONITOR] Ingest: {rx_pps:.1f} pps ({kbps:.1f} kbps)")
                 stat_start_time = now
                 stat_rx_packets = 0
                 stat_bytes_total = 0
 
             # C. PROCESS
             if len(data) > 0:
-                # 🔧 FIX: HARDCODE SATELLITE ID 1
-                # Ensures all raw packets go to the main bucket
-                sat_id = 1
-                payload = data 
-                
-                if sat_id not in raw_buffers: 
-                    raw_buffers[sat_id] = bytearray()
-                
-                raw_buffers[sat_id].extend(payload)
+                buffer.extend(data)
                 
                 # Chunk and feed to Engine
-                while len(raw_buffers[sat_id]) >= TARGET_CHUNK_SIZE:
-                    chunk = raw_buffers[sat_id][:TARGET_CHUNK_SIZE]
-                    engine.queue_audio(sat_id, bytes(chunk))
-                    raw_buffers[sat_id] = raw_buffers[sat_id][TARGET_CHUNK_SIZE:]
+                # We process while buffer is >= TARGET_CHUNK_SIZE
+                while len(buffer) >= TARGET_CHUNK_SIZE:
+                    chunk = buffer[:TARGET_CHUNK_SIZE]
+                    engine_queue(sat_id, bytes(chunk))
+                    
+                    # Efficiently slice the buffer 
+                    del buffer[:TARGET_CHUNK_SIZE]
 
     except KeyboardInterrupt:
         print("\n--- SHUTTING DOWN ---")

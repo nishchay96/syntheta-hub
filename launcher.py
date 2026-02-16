@@ -3,37 +3,54 @@ import os
 import sys
 import subprocess
 import time
-import socket
 import shutil
 import signal
+import requests
 
 # ==============================================================================
 # ⚙️ CONFIGURATION
 # ==============================================================================
-ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-GO_DIR = os.path.join(ROOT_DIR, "go")
-PY_DIR = os.path.join(ROOT_DIR, "python")
+# 🛑 ROOT LOCATION (Strictly Enforced)
+ROOT_DIR = "/media/nishchay/Study/syntheta-hub"
 
-# Ports to clean before starting (The "Surgical" List)
+# 🛑 VENV LOCATION (The one with Kokoro & Brain installed)
+VENV_PATH = os.path.join(ROOT_DIR, "venv")
+VENV_PYTHON = os.path.join(VENV_PATH, "bin", "python")
+
+# Service Directories
+GO_DIR = os.path.join(ROOT_DIR, "go")
+PY_DIR = os.path.join(ROOT_DIR, "python") # main.py is here
+
+# Ports to clean
 TARGET_PORTS = [5555, 5556, 6000, 6002, 9001]
+OLLAMA_API_URL = "http://localhost:11434/api/tags"
 
 def log(msg, level="INFO"):
     prefix = {"INFO": "ℹ️", "WARN": "⚠️", "ERROR": "❌", "BOOT": "🚀", "CHECK": "🔍"}.get(level, "")
     print(f"[{level}] {prefix} {msg}", flush=True)
 
 # ==============================================================================
-# 🔍 UTILS
+# 🔍 ENVIRONMENT UTILS
 # ==============================================================================
-def find_python_exe():
-    # 🟢 UPDATED: Checks the 'audio' folder structure first based on your path
-    candidates = [
-        os.path.join(PY_DIR, "audio", "venv", "bin", "python"),
-        os.path.join(PY_DIR, "venv", "bin", "python"),
-        sys.executable
-    ]
-    for p in candidates:
-        if os.path.exists(p): return p
-    return sys.executable
+def verify_venv():
+    """Ensures we are using the correct Python with ALL dependencies."""
+    if not os.path.exists(VENV_PYTHON):
+        log(f"❌ Virtual Environment missing at: {VENV_PYTHON}", "ERROR")
+        sys.exit(1)
+    
+    # Check for BOTH Voice (Kokoro) and Brain (SentenceTransformers) libs
+    try:
+        subprocess.check_call(
+            [VENV_PYTHON, "-c", "import kokoro; import sentence_transformers"], 
+            stdout=subprocess.DEVNULL, 
+            stderr=subprocess.DEVNULL
+        )
+        log("✅ Voice & Brain dependencies verified.", "INFO")
+    except subprocess.CalledProcessError:
+        log("❌ Dependencies missing! Activate venv and run:", "ERROR")
+        log("   pip install kokoro soundfile numpy sentence-transformers qdrant-client requests ollama", "ERROR")
+        sys.exit(1)
+    return VENV_PYTHON
 
 def check_go_installed():
     return shutil.which("go") is not None
@@ -52,54 +69,81 @@ def get_sanitized_env():
     """
     env = os.environ.copy()
     # Strip dangerous variables that confuse system apps
-    keys_to_strip = ["LD_LIBRARY_PATH", "PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"]
+    keys_to_strip = ["LD_LIBRARY_PATH", "PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV", "GTK_PATH", "GIO_MODULE_DIR"]
     for key in keys_to_strip:
         env.pop(key, None)
     return env
 
+def get_brain_env():
+    """Sets up the environment specifically for the Python Brain."""
+    env = os.environ.copy()
+    # 🔧 FIX: Manually 'activate' the venv for the subprocess
+    env["VIRTUAL_ENV"] = VENV_PATH
+    env["PATH"] = os.path.join(VENV_PATH, "bin") + os.pathsep + env.get("PATH", "")
+    # Kokoro needs offline mode enforced
+    env["HF_HUB_OFFLINE"] = "1" 
+    return env
+
 # ==============================================================================
-# 🧹 SURGICAL CLEANUP
+# 🚀 OLLAMA WARM-UP & CLEANUP
 # ==============================================================================
+def ensure_ollama_ready():
+    log("Checking LLM Service (Ollama)...", "CHECK")
+    try:
+        if requests.get(OLLAMA_API_URL, timeout=0.5).status_code == 200:
+            log("✅ LLM Service is Online.", "INFO")
+            return True
+    except:
+        pass
+    log("⚠️ Ollama offline. Starting background service...", "WARN")
+    subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(2)
+    return True
+
 def kill_process_on_port(port):
     try:
-        # lsof -t -i:PORT returns only the PID
         pid = subprocess.check_output(["lsof", "-t", "-i", f":{port}"], stderr=subprocess.DEVNULL).strip().decode()
         if pid:
-            log(f"   - Port {port} is busy. Killing PID {pid}...", "WARN")
+            log(f"   - Port {port} busy. Killing PID {pid}...", "WARN")
             os.kill(int(pid), signal.SIGKILL)
     except:
         pass
 
 def ensure_clean_slate():
-    log("Cleaning ports...", "INFO")
     for port in TARGET_PORTS:
         kill_process_on_port(port)
     time.sleep(0.5)
 
 # ==============================================================================
-# 🚀 MAIN LOOP
+# 🚀 MAIN MONITOR LOOP
 # ==============================================================================
 def main():
     os.system("clear")
     print("==========================================")
-    print("   SYNTHETA SOVEREIGN BOOTLOADER (LINUX)")
+    print("   SYNTHETA SOVEREIGN BOOTLOADER (V2.3)")
+    print("   Target Venv: syntheta-hub/venv")
     print("==========================================")
 
-    py_exe = find_python_exe()
-    term_cmd = check_terminal_installed()
+    # 1. VERIFY VENV & DEPENDENCIES
+    py_exe = verify_venv()
 
     if not check_go_installed():
-        log("Go is not installed! Run: sudo apt install golang", "ERROR")
+        log("Go not installed. Run: sudo apt install golang", "ERROR")
         sys.exit(1)
+
+    term_cmd = check_terminal_installed()
+    ensure_ollama_ready()
 
     # 2. COMPILE GO
     log("Compiling Go Hub...", "BOOT")
     try:
-        subprocess.run(["go", "build", "-o", "syntheta-hub", "./cmd"], cwd=GO_DIR, check=True)
-        log("✅ Go Compilation Successful.", "INFO")
-    except subprocess.CalledProcessError:
-        log("❌ Go Compilation Failed.", "ERROR")
-        sys.exit(1)
+        subprocess.run(["go", "build", "-o", "syntheta-hub", "."], cwd=os.path.join(GO_DIR, "cmd"), check=True)
+    except Exception:
+        try:
+            subprocess.run(["go", "build", "-o", "syntheta-hub", "."], cwd=GO_DIR, check=True)
+        except:
+            log("❌ Go Compilation Failed.", "ERROR")
+            sys.exit(1)
 
     while True:
         try:
@@ -107,39 +151,43 @@ def main():
             ensure_clean_slate()
 
             # 4. LAUNCH GO BRIDGE
-            log("Launching Audio Bridge (Go)...", "BOOT")
-            go_bin = os.path.join(GO_DIR, "syntheta-hub")
-            go_bin = os.path.abspath(go_bin)
-            
-            # 🟢 FIX: USE SANITIZED ENV TO PREVENT CRASHES
+            log("Launching Audio Bridge...", "BOOT")
+            go_bin = os.path.join(GO_DIR, "syntheta-hub") 
+            if not os.path.exists(go_bin): 
+                 go_bin = os.path.join(GO_DIR, "cmd", "syntheta-hub")
+
+            # 🟢 FIX: Use Sanitized Env to prevent Gnome-Terminal crashes
             clean_env = get_sanitized_env()
 
             if term_cmd:
                 log(f"   - Spawning in {term_cmd}...", "INFO")
                 if "gnome-terminal" in term_cmd:
-                    # Gnome terminal needs the clean env to avoid libpthread crash
                     subprocess.Popen([term_cmd, "--", go_bin], cwd=GO_DIR, env=clean_env)
                 elif "xfce4-terminal" in term_cmd:
                     subprocess.Popen([term_cmd, "-e", go_bin], cwd=GO_DIR, env=clean_env)
                 elif "xterm" in term_cmd:
                     subprocess.Popen([term_cmd, "-e", go_bin], cwd=GO_DIR, env=clean_env)
                 else:
-                    # Generic fallback
+                    # Fallback for others
                     subprocess.Popen([term_cmd, "-e", go_bin], cwd=GO_DIR, env=clean_env)
             else:
-                log("⚠️ No terminal emulator found. Running Go in background.", "WARN")
-                subprocess.Popen([go_bin], cwd=GO_DIR, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                log("⚠️ No terminal emulator. Running Go in background.", "WARN")
+                subprocess.Popen([go_bin], cwd=GO_DIR, stdout=subprocess.DEVNULL)
 
             time.sleep(2) 
 
-            # 5. LAUNCH PYTHON BRAIN (IN CURRENT TERMINAL)
-            log(f"Launching Sovereign Brain using {py_exe}...", "BOOT")
+            # 5. LAUNCH PYTHON BRAIN
+            log(f"Launching Brain...", "BOOT")
             print("------------------------------------------")
             
-            # Python keeps the current environment (Venv is good here)
-            brain_process = subprocess.run([py_exe, "-u", "main.py"], cwd=PY_DIR)
+            # Python keeps the Venv environment
+            brain_process = subprocess.run(
+                [py_exe, "-u", "main.py"], 
+                cwd=PY_DIR,
+                env=get_brain_env() 
+            )
 
-            # 6. EXIT HANDLING
+            # 6. RESTART HANDLING
             if brain_process.returncode == 42:
                 log("🔄 Restart requested...", "BOOT")
                 time.sleep(1)

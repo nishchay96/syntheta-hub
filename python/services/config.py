@@ -36,6 +36,12 @@ SILENCE_TIMEOUT = 2.0
 # The Engine handles accumulation, so this is safe.
 TARGET_CHUNK_SIZE = 1280 
 
+# ==================== TTS CONFIGURATION (KOKORO) ====================
+# 🟢 NEW: Persona Mixing Constants for 'Syntheta'
+KOKORO_VOICE_PRIMARY = 'bf_emma'    # British, Warm (60% Weight)
+KOKORO_VOICE_SECONDARY = 'af_bella' # American, High Energy (40% Weight)
+KOKORO_SPEED = 1.1                  # Slightly faster for youthful energy
+
 # ==================== INTEGRATIONS ====================
 ENABLE_SERVER_WAKE_CHECK = False
 WAKE_MODELS = []
