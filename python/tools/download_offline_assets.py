@@ -17,11 +17,12 @@ PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, "../../"))
 ASSETS_DIR = os.path.join(PROJECT_ROOT, "assets", "models")
 
 # Define target folders
-WHISPER_PATH = os.path.join(ASSETS_DIR, "whisper-base-en")
+# 🟢 UPDATE: Pointing to the new Qwen model folder
+QWEN_PATH = os.path.join(ASSETS_DIR, "Qwen3-ASR-1.7B")
 SEMANTIC_PATH = os.path.join(ASSETS_DIR, "all-MiniLM-L6-v2")
 
 # Create folders if missing
-os.makedirs(WHISPER_PATH, exist_ok=True)
+os.makedirs(QWEN_PATH, exist_ok=True)
 os.makedirs(SEMANTIC_PATH, exist_ok=True)
 
 logger.info(f"📂 Target Asset Folder: {ASSETS_DIR}")
@@ -38,21 +39,27 @@ else:
 
 logger.info(">>> STARTING OFFLINE ASSET DOWNLOADER <<<")
 
-# === 2. DOWNLOAD WHISPER (The Ears) ===
+# === 2. DOWNLOAD QWEN3-ASR (The New Ears) ===
 try:
-    logger.info("1. Downloading Whisper Model ('base.en')...")
-    from faster_whisper import download_model
+    logger.info("1. Downloading Qwen3-ASR-1.7B...")
     
-    # Download directly into the target folder
-    # This prevents creating a subfolder like 'whisper-base-en/models--systran--faster-whisper-base.en'
-    model_path = download_model("base.en", output_dir=WHISPER_PATH)
+    # We use snapshot_download because it simply fetches files.
+    # It doesn't try to load the model code, avoiding "Architecture not found" errors.
+    from huggingface_hub import snapshot_download
     
-    logger.info(f"✅ Whisper Saved to: {model_path}")
+    snapshot_download(
+        repo_id="Qwen/Qwen3-ASR-1.7B",
+        local_dir=QWEN_PATH,
+        local_dir_use_symlinks=False, # Important for true offline portability
+        resume_download=True
+    )
+    
+    logger.info(f"✅ Qwen3-ASR Saved to: {QWEN_PATH}")
 
 except ImportError:
-    logger.error("❌ 'faster_whisper' not found. Run: pip install faster-whisper")
+    logger.error("❌ 'huggingface_hub' not found. Run: pip install huggingface_hub")
 except Exception as e:
-    logger.error(f"❌ Whisper Download Failed: {e}")
+    logger.error(f"❌ Qwen Download Failed: {e}")
 
 # === 3. DOWNLOAD SEMANTIC BRAIN (The Reflex) ===
 try:
