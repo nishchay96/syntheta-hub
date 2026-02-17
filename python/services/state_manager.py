@@ -163,7 +163,12 @@ class EngineState:
             self.buffers[sat_id] = bytearray()
         return self.buffers[sat_id]
 
+# ========================================================
+    # 🔧 INTERRUPTION & RESUME LOGIC (The Memory)
+    # ========================================================
+
     def reset_interruption(self, sat_id):
+        """Clears all interruption tracking for a clean slate."""
         if sat_id in self.interrupted_state or sat_id in self.resume_pending:
             logger.info(f"🧹 Clearing Stale Interruption State for Sat {sat_id}")
             self.interrupted_state.pop(sat_id, None)
@@ -171,16 +176,29 @@ class EngineState:
             self.playback_info.pop(sat_id, None)
 
     def track_playback(self, sat_id, filepath):
+        """Records what is currently playing to allow for snapshots."""
         self.playback_info[sat_id] = {"file": filepath, "start_time": time.time()}
 
     def snapshot_playback(self, sat_id):
+        """
+        Captures the exact moment audio was cut off.
+        Sets resume_pending to True to trigger the Engine's confirmation logic.
+        """
         if sat_id in self.playback_info:
             info = self.playback_info[sat_id]
-            duration = time.time() - info["start_time"]
-            self.interrupted_state[sat_id] = {"file": info["file"], "duration": duration}
-            logger.info(f"⏸️  Audio Paused at {duration:.2f}s")
+            played_duration = time.time() - info["start_time"]
+            
+            # Save the state for a potential resume
+            self.interrupted_state[sat_id] = {
+                "file": info["file"], 
+                "seconds_played": played_duration
+            }
+            
+            # 🟢 TRIGGER: Tell the engine to ask for confirmation next time
+            self.resume_pending[sat_id] = True
+            
+            logger.info(f"⏸️  Audio Interrupted at {played_duration:.2f}s. Resume Pending.")
             self.playback_info.pop(sat_id, None)
-
     def calculate_rms(self, pcm_bytes):
         if not pcm_bytes: return 0.0, np.array([], dtype=np.float32)
         audio_float = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0

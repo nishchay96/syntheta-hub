@@ -39,7 +39,10 @@ from core.pi_manager import PiManager
 from .state_manager import EngineState
 from .smart_tts_cache import SmartTTSCache 
 from .transcriber import AudioTranscriber
+# 🟢 FIX: Explicitly import telemetry flag to ensure visibility in threaded reports
 from .config import *
+from .config import ENABLE_LATENCY_TELEMETRY
+
 from .communications import HomeAssistantClient
 from .audio_tools import create_resume_file, pad_audio_file
 from tts_engine import TTSEngine
@@ -84,7 +87,7 @@ class SynthetaEngine:
         self.ha = HomeAssistantClient(HA_TOKEN, HA_URL)
         self.emitter = STTEventEmitter()
         
-        self.transcriber = AudioTranscriber(MODEL_SIZE, device="cuda")
+        self.transcriber = AudioTranscriber()
         self.brain = SemanticBrain() 
         self.llm = OllamaBridge()
         self.gatekeeper = AudioGatekeeper()
@@ -105,7 +108,6 @@ class SynthetaEngine:
         self.hallucinations = list(DEFAULT_HALLUCINATIONS)
         self.ghost_counters = {} 
 
-        # 🟢 NEW: Multi-Node Silent Wake Timers
         self.wwd_timers = {} 
         
         threading.Thread(target=self._processing_loop, daemon=True).start()
@@ -130,7 +132,6 @@ class SynthetaEngine:
     def on_hardware_wake(self, sat_id, payload=None):
         logger.info(f">>> ⚡ HARDWARE WAKE: Satellite {sat_id}")
 
-        # 🟢 STEP 1: KILL PENDING UN-MUTE TIMER (Interruption Safety)
         if sat_id in self.wwd_timers:
             self.wwd_timers[sat_id].cancel()
             del self.wwd_timers[sat_id]
@@ -240,11 +241,16 @@ class SynthetaEngine:
         threading.Thread(target=self._run_pipeline, args=(sat_id, audio_data)).start()
 
     def _run_pipeline(self, sat_id, audio_bytes):
-        text, confidence = self.transcriber.transcribe(audio_bytes)
-        if len(text) < 2 or confidence < 0.4: return
+        text, confidence, turn_telemetry = self.transcriber.transcribe(audio_bytes)
+        # 🟢 FIX: Record the actual start time in telemetry for total latency calculation
+        turn_telemetry["start_time"] = time.perf_counter()
+        
+        if not text or len(text) < 2 or confidence < 0.4: return
         if text.lower() in self.hallucinations: return
+        
         logger.info(f">>> 📝 INPUT: '{text}' (Conf: {confidence:.2f}) [Mode: {self.security_mode}]")
         self.state.last_active_time[sat_id] = time.time()
+        
         if self.security_mode == "SUDO_CHALLENGE":
             if "sudo login" in text.lower():
                 self._enter_sudo_calibration(sat_id)
@@ -254,56 +260,81 @@ class SynthetaEngine:
         if self.security_mode == "SUDO_SESSION":
             self._handle_sudo_command(sat_id, text)
             return
-        self._handle_normal_command(sat_id, text)
+            
+        self._handle_normal_command(sat_id, text, turn_telemetry)
 
     # =========================================
     #  LOGIC HANDLERS (THE BRAIN)
     # =========================================
-    def _handle_normal_command(self, sat_id, text):
-        # RESUME POLICY HANDLER
+    def _handle_normal_command(self, sat_id, text, telemetry=None):
+        if telemetry is None: telemetry = {}
+        
+        # 🟢 FIX: RESUME POLICY STATE MACHINE
         if self.state.resume_pending.get(sat_id):
-             if "yes" in text.lower() or "continue" in text.lower():
+             # CLEAR FLAG IMMEDIATELY: Prevents re-confirmation loop
+             self.state.resume_pending[sat_id] = False 
+             
+             clean_input = text.lower()
+             if "yes" in clean_input or "continue" in clean_input:
+                  logger.info(f"✅ User Confirmed Resume for Sat {sat_id}")
                   self.handle_resume_confirmation(sat_id, True)
                   return
-             elif "no" in text.lower() or "stop" in text.lower():
+             elif "no" in clean_input or "stop" in clean_input:
+                  logger.info(f"🚫 User Declined Resume for Sat {sat_id}")
                   self.handle_resume_confirmation(sat_id, False)
                   return
+             else:
+                  # Non-confirming input: re-arm flag to maintain state
+                  logger.warning(f"❓ Ambiguous response to confirmation: {text}")
+                  self.state.resume_pending[sat_id] = True
 
+        # Checkpoint B: Brain Latency
+        brain_start = time.perf_counter()
         plan = self.pi.process_query(sat_id, text)
+        
         if plan and plan.get("intent") == "SUDO_ACCESS":
             self.security_mode = "SUDO_CHALLENGE"
             self.sudo_challenge_deadline = time.time() + 15.0
             self._speak(sat_id, "Did you mean Sudo Access? Say Sudo Login to confirm.")
             return
         if plan and plan.get("intent") != "unknown":
-            self._execute_plan(sat_id, plan)
+            telemetry["brain_lat_ms"] = round((time.perf_counter() - brain_start) * 1000, 2)
+            self._execute_plan(sat_id, plan, telemetry)
             return
+            
         self.state.is_conversation = True
         processed = self.brain.process(text)
+        telemetry["brain_lat_ms"] = round((time.perf_counter() - brain_start) * 1000, 2)
+        
+        # Checkpoint C: LLM Latency
+        llm_start = time.perf_counter()
         self.state.update_context(sat_id, processed['input'], processed['entities'])
         packet = self.state.build_golden_packet(sat_id, processed['input'], processed.get('emotion', 'neutral'))
         llm_response = self.llm.generate(packet)
+        telemetry["llm_lat_ms"] = round((time.perf_counter() - llm_start) * 1000, 2)
+        
         self.state.commit_assistant_response(sat_id, llm_response)
-        self._speak(sat_id, llm_response)
+        self._speak(sat_id, llm_response, telemetry=telemetry)
 
     def handle_resume_confirmation(self, sat_id, confirmed=True):
         if not confirmed:
             self.state.reset_interruption(sat_id)
-            self._speak(sat_id, "Okay, stopped.")
+            self._speak(sat_id, "Okay, stopping.")
             return
 
         interrupted = self.state.interrupted_state.get(sat_id)
         if not interrupted: return
 
-        # 🟢 Create clipped segment for resume
+        # 🟢 FIX: Accessing correct keys 'seconds_played' from state_manager snapshot
         resume_file_path = create_resume_file(
             interrupted["file"], 
-            interrupted["seconds_played"], 
+            interrupted.get("seconds_played", 0), 
             rewind_sec=2.0
         )
 
         if resume_file_path:
             self._speak_file(sat_id, resume_file_path)
+            # Cleanup after successful resumption
             self.state.reset_interruption(sat_id)
 
     def _handle_sudo_command(self, sat_id, text):
@@ -353,7 +384,7 @@ class SynthetaEngine:
     # =========================================
     #  EXECUTION & OUTPUT
     # =========================================
-    def _execute_plan(self, sat_id, plan):
+    def _execute_plan(self, sat_id, plan, telemetry=None):
         if plan.get("intent") == "STOP":
              self._close_session(sat_id)
              return
@@ -361,39 +392,42 @@ class SynthetaEngine:
             self.ha.execute(plan["execute"])
         force_listen = plan.get("force_listen", False)
         if plan.get("speak"):
-            self._speak(sat_id, plan["speak"], force_listen)
+            self._speak(sat_id, plan["speak"], force_listen, telemetry=telemetry)
         elif force_listen and self.comms:
             self.comms.send_command(sat_id, {"cmd": "force_listen", "timeout": 4})
 
-    def _speak(self, sat_id, text, force_listen=False):
+    def _speak(self, sat_id, text, force_listen=False, telemetry=None):
         if self.tts:
             if self.smart_cache:
-                self.smart_cache.process_and_speak(sat_id, text, lambda t: self._speak_direct(sat_id, t, force_listen))
+                self.smart_cache.process_and_speak(sat_id, text, lambda t: self._speak_direct(sat_id, t, force_listen, telemetry))
             else:
-                self._speak_direct(sat_id, text, force_listen)
+                self._speak_direct(sat_id, text, force_listen, telemetry)
 
-    def _speak_direct(self, sat_id, text, force_listen=False):
+    def _speak_direct(self, sat_id, text, force_listen=False, telemetry=None):
+        # Checkpoint D: TTS Latency
+        tts_start = time.perf_counter()
         path = self.tts.generate_to_file(text)
+        
+        if telemetry is not None:
+            telemetry["tts_lat_ms"] = round((time.perf_counter() - tts_start) * 1000, 2)
+            self._report_latency(telemetry)
+            
         self._speak_file(sat_id, path, force_listen)
 
     def _speak_file(self, sat_id, path, force_listen=False):
         if not path or not os.path.exists(path): return
         
-        # 🟢 STEP 1: CALCULATE MASTER TIMER (Duration + 2s Margin)
         duration = self.state.get_wav_duration(path)
         silent_zone = duration + 2.0
 
-        # 🟢 STEP 2: TOGGLE SILENT WWD ON ALPHA
         if self.comms:
             self.comms.send_command(sat_id, {"cmd": "wwd_mode", "value": "silent"})
 
-        # 🟢 STEP 3: SCHEDULE UN-MUTE (Master Timer)
         if sat_id in self.wwd_timers: self.wwd_timers[sat_id].cancel()
         self.wwd_timers[sat_id] = threading.Timer(silent_zone, 
             lambda: self.comms.send_command(sat_id, {"cmd": "wwd_mode", "value": "normal"}))
         self.wwd_timers[sat_id].start()
 
-        # 🟢 STEP 4: TRACK & PLAY
         self.state.track_playback(sat_id, path)
         self.state.deaf_until = time.time() + duration + 0.2
         logger.info(f"🔈 Handing off playback to Go Bridge for Sat {sat_id}")
@@ -402,3 +436,24 @@ class SynthetaEngine:
         if force_listen and self.comms:
             logger.info(f"🎤 Scheduling Remote Mic Open (force_listen) for Sat {sat_id} in {duration:.2f}s")
             threading.Timer(duration + 0.2, lambda: self.comms.send_command(sat_id, {"cmd": "force_listen", "timeout": 4})).start()
+
+    def _report_latency(self, tele):
+            # 🟢 FIX: Resolved NameError with explicit import
+            if not ENABLE_LATENCY_TELEMETRY: return
+            
+            stt = tele.get("stt_lat_ms", 0)
+            brain = tele.get("brain_lat_ms", 0)
+            llm = tele.get("llm_lat_ms", 0)
+            tts = tele.get("tts_lat_ms", 0)
+            
+            start = tele.get("start_time", time.perf_counter())
+            total = round((time.perf_counter() - start) * 1000, 2)
+            
+            print("\n" + "="*45)
+            print(f"📊 OMEGA PERFORMANCE REPORT (Total: {total}ms)")
+            print("-" * 45)
+            print(f" 🟢 STT (Whisper):   {stt:>7} ms")
+            print(f" 🔵 Brain (NLU):   {brain:>7} ms")
+            print(f" 🟣 LLM (Ollama):  {llm:>7} ms")
+            print(f" 🟠 TTS (Kokoro):  {tts:>7} ms")
+            print("="*45 + "\n")

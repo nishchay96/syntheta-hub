@@ -1,56 +1,98 @@
 import os
+import time
 import logging
-from huggingface_hub import snapshot_download
+from huggingface_hub import snapshot_download, hf_hub_download
 
-# Setup Logging
+# === CONFIGURATION ===
+# 1. Setup Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
-logger = logging.getLogger("SemanticDownloader")
+logger = logging.getLogger("SynthetaDownloader")
 
-# === PATH CONFIGURATION ===
-CURRENT_DIR = os.path.dirname(os.path.abspath(__file__)) 
+# 2. Path Setup
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, "../../"))
 ASSETS_DIR = os.path.join(PROJECT_ROOT, "assets", "models")
 
-# Define target folders
+# 3. Mirror (Good choice for stability)
+os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
+
+# === HELPER FUNCTION: RETRY LOOP ===
+def robust_download(func, **kwargs):
+    """
+    Wraps HF download functions in a retry loop.
+    If it fails/stalls, it waits 5s and tries again exactly where it left off.
+    """
+    max_retries = 100 # Effectively infinite for bad internet
+    attempt = 0
+    
+    while attempt < max_retries:
+        try:
+            func(**kwargs)
+            return # Success!
+        except Exception as e:
+            attempt += 1
+            logger.warning(f"⚠️ Download interrupted. Retrying in 5s... (Attempt {attempt}/{max_retries})")
+            logger.error(f"Error: {e}")
+            time.sleep(5) # Wait before retrying
+    
+    logger.error("❌ Failed after max retries.")
+    raise ConnectionError("Download failed.")
+
+# === 1. DOWNLOAD SEMANTIC BRAIN (BGE) ===
 BGE_M3_PATH = os.path.join(ASSETS_DIR, "bge-m3")
 RERANKER_PATH = os.path.join(ASSETS_DIR, "bge-reranker-v2-m3")
 
-# Create folders
-os.makedirs(BGE_M3_PATH, exist_ok=True)
-os.makedirs(RERANKER_PATH, exist_ok=True)
+logger.info(">>> STARTING ROBUST DOWNLOADER <<<")
 
-# === MIRROR CONFIG ===
-os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
+logger.info("1/3: Downloading BGE-M3...")
+robust_download(
+    snapshot_download,
+    repo_id="BAAI/bge-m3",
+    local_dir=BGE_M3_PATH,
+    local_dir_use_symlinks=False,
+    resume_download=True,  # FORCE RESUME
+    max_workers=2,         # LIMIT CONNECTIONS (Better for 4mbps stability)
+    ignore_patterns=["*.msgpack", "*.h5", "*.ot"]
+)
 
-logger.info(">>> STARTING SEMANTIC BRAIN UPGRADE DOWNLOADER <<<")
+logger.info("2/3: Downloading BGE-Reranker...")
+robust_download(
+    snapshot_download,
+    repo_id="BAAI/bge-reranker-v2-m3",
+    local_dir=RERANKER_PATH,
+    local_dir_use_symlinks=False,
+    resume_download=True,
+    max_workers=2,
+    ignore_patterns=["*.msgpack", "*.h5", "*.ot"]
+)
 
-# --- 1. DOWNLOAD BGE-M3 (The Contextual Brain) ---
-try:
-    logger.info("1/2: Downloading BGE-M3 (SOTA Embeddings)...")
-    snapshot_download(
-        repo_id="BAAI/bge-m3",
-        local_dir=BGE_M3_PATH,
+# === 2. DOWNLOAD QWEN ASR (The Listener) ===
+QWEN_PATH = os.path.join(ASSETS_DIR, "Qwen3-ASR-1.7B")
+MODEL_REPO = "Qwen/Qwen3-ASR-1.7B"
+shards = [
+    "model-00001-of-00002.safetensors",
+    "model-00002-of-00002.safetensors",
+    "model.safetensors.index.json"
+]
+
+logger.info("3/3: Downloading Qwen3-ASR (Smart Resume Enabled)...")
+
+for shard in shards:
+    logger.info(f"   -> Processing {shard}...")
+    # NOTE: I removed the os.remove() line. 
+    # HF automatically checks file hash. If it's half-downloaded, it resumes.
+    # If it's corrupt, it re-downloads. Trust the library.
+    
+    robust_download(
+        hf_hub_download,
+        repo_id=MODEL_REPO,
+        filename=shard,
+        local_dir=QWEN_PATH,
         local_dir_use_symlinks=False,
-        ignore_patterns=["*.msgpack", "*.h5", "*.ot"] 
+        resume_download=True
     )
-    logger.info("✅ BGE-M3 Secured.")
-except Exception as e:
-    logger.error(f"❌ BGE-M3 Download Failed: {e}")
-
-# --- 2. DOWNLOAD BGE-RERANKER (The Quality Filter) ---
-try:
-    logger.info("2/2: Downloading BGE-Reranker-V2-M3...")
-    snapshot_download(
-        repo_id="BAAI/bge-reranker-v2-m3",
-        local_dir=RERANKER_PATH,
-        local_dir_use_symlinks=False,
-        ignore_patterns=["*.msgpack", "*.h5", "*.ot"]
-    )
-    logger.info("✅ BGE-Reranker Secured.")
-except Exception as e:
-    logger.error(f"❌ Reranker Download Failed: {e}")
 
 print("\n---------------------------------------------------")
-print("🧠 SEMANTIC UPGRADE COMPLETE.")
-print(f"Models saved to: {ASSETS_DIR}")
+print("✅ ALL MODELS SECURED & VERIFIED.")
+print(f"📂 Location: {ASSETS_DIR}")
 print("---------------------------------------------------")

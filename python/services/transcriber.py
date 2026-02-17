@@ -1,63 +1,92 @@
 import logging
 import os
-import torch
 import numpy as np
-from qwen_asr import Qwen3ASRModel
+import time
+from faster_whisper import WhisperModel
 
-# CONFIG
-MODEL_FOLDER_NAME = "Qwen3-ASR-1.7B"
-logger = logging.getLogger("QwenASR")
+# Configuration Imports
+try:
+    from .config import WHISPER_PROMPT, ASR_MODEL_TYPE, ASR_MODEL_PATH, ASR_DEVICE
+except ImportError:
+    # Standard fallbacks for isolated testing
+    WHISPER_PROMPT = "Syntheta assistant."
+    ASR_MODEL_TYPE = "WHISPER"
+    ASR_MODEL_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../assets/models/whisper-base-en'))
+    ASR_DEVICE = "cpu"
+
+logger = logging.getLogger("Transcriber")
 
 class AudioTranscriber:
-    def __init__(self, model_size=None, device="cuda"):
-        """
-        🚀 MEMORY OPTIMIZED: Qwen3-ASR for 4GB GPUs
-        Uses float16 and automatic device mapping.
-        """
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        
-        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../'))
-        model_path = os.path.join(base_dir, "assets", "models", MODEL_FOLDER_NAME)
+    def __init__(self):
+        self.model_type = ASR_MODEL_TYPE.upper()
+        self.device = ASR_DEVICE
+        self.model = None
 
-        logger.info(f"Initializing Qwen3-ASR (Memory Optimized Mode)...")
+        logger.info(f"🚀 Initializing ASR Engine: {self.model_type}")
+        self._init_whisper()
 
+    def _init_whisper(self):
+        """
+        Loads the Whisper model using faster-whisper (CTranslate2).
+        Uses int8 quantization for high-speed CPU inference.
+        """
         try:
-            # 🟢 THE FIX: 
-            # 1. dtype=torch.float16 (Uses 2x less VRAM than float32)
-            # 2. device_map="auto" (Spills over to CPU RAM if 4GB isn't enough)
-            # 3. low_cpu_mem_usage=True (Prevents RAM spikes during loading)
-            self.model = Qwen3ASRModel.from_pretrained(
-                model_path,
-                dtype=torch.float16 if self.device == "cuda" else torch.float32,
-                device_map="auto", 
-                trust_remote_code=True,
-                low_cpu_mem_usage=True
+            logger.info(f"Loading Whisper from: {ASR_MODEL_PATH}")
+            # int8 quantization is perfect for your Acer Aspire's CPU
+            self.model = WhisperModel(
+                ASR_MODEL_PATH, 
+                device=self.device, 
+                compute_type="int8"
             )
-            logger.info("✅ Qwen3-ASR Loaded. Memory balanced between GPU/CPU.")
-            
+            logger.info("✅ Whisper-base Loaded Successfully (Stable Mode).")
         except Exception as e:
-            logger.critical(f"Failed to load Qwen3-ASR: {e}")
+            logger.critical(f"❌ Failed to load Whisper: {e}")
             raise e
 
     def transcribe(self, audio_bytes):
-        if not audio_bytes or len(audio_bytes) < 3200: 
-            return "", 0.0
+        """
+        Transcribes raw 16kHz PCM bytes from the UDP stream.
+        """
+        if not audio_bytes or len(audio_bytes) < 3200:
+            return "", 0.0, {"stt_lat_ms": 0}
 
+        start_time = time.perf_counter()
+        
         try:
-            # Convert raw PCM16 bytes to Float32 array
+            # 1. Normalize the raw 16-bit PCM bytes into float32
+            # Equation: $x_{normalized} = \frac{x_{pcm}}{32768.0}$
             audio_np = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
 
-            # Native Inference
-            results = self.model.transcribe(
-                audio=(audio_np, 16000), 
-                language="English"
+            # 2. Transcribe via Faster-Whisper
+            # segments is a generator; we iterate to get the full text
+            segments, info = self.model.transcribe(
+                audio_np, 
+                beam_size=5, 
+                language="en",
+                initial_prompt=WHISPER_PROMPT
             )
 
-            if results and len(results) > 0:
-                return results[0].text.strip(), 1.0
+            full_text = []
+            avg_logprob = 0.0
+            count = 0
+
+            for segment in segments:
+                full_text.append(segment.text)
+                avg_logprob += segment.avg_logprob
+                count += 1
+
+            # 3. Finalize and Telemetry
+            text = " ".join(full_text).strip()
+            confidence = np.exp(avg_logprob / count) if count > 0 else 0.0
             
-            return "", 0.0
+            latency_ms = (time.perf_counter() - start_time) * 1000
+            telemetry = {"stt_lat_ms": round(latency_ms, 2)}
+
+            if text:
+                logger.info(f"🗣️ [WHISPER] '{text}' ({latency_ms:.1f}ms)")
+            
+            return text, confidence, telemetry
 
         except Exception as e:
-            logger.error(f"Transcription Error: {e}")
-            return "", 0.0
+            logger.error(f"Whisper Inference Error: {e}")
+            return "", 0.0, {"stt_lat_ms": 0}
