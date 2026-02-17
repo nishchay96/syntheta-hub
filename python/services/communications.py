@@ -26,9 +26,14 @@ class SatelliteNetManager:
         self.active_sockets = {}    # Map[SatID] -> Socket Object
         self.next_sat_id = 1        # Auto-increment counter
         
-        # Start TCP Listener for the Control Plane
+        # Start TCP Listener for the Control Plane (Hardware Nodes)
         self.server_thread = threading.Thread(target=self._tcp_server_loop, daemon=True)
         self.server_thread.start()
+
+        # 🟢 FIX: Create a persistent link to the Go Bridge (Omega Internal)
+        # This allows Python to receive 'playback_finished' events from the audio relay.
+        self.go_link_thread = threading.Thread(target=self._go_bridge_link_loop, daemon=True)
+        self.go_link_thread.start()
         
     def _tcp_server_loop(self):
         """Host the TCP Control Server (Port 5556)"""
@@ -64,6 +69,36 @@ class SatelliteNetManager:
             except Exception as e:
                 logger.error(f"Server Accept Error: {e}")
 
+    def _go_bridge_link_loop(self):
+        """
+        Persistent client connection to the Go Dispatcher (Port 9001).
+        Synchronizes playback state by listening for 'playback_finished'.
+        """
+        while self.running:
+            try:
+                # 🟢 FIX: Connect to Go's internal event broadcaster
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.settimeout(5.0)
+                    s.connect(("127.0.0.1", 9001))
+                    logger.info("🔗 Linked to Go Bridge (Omega Feedback Loop Active)")
+                    
+                    # Process incoming JSON stream
+                    f = s.makefile('r', encoding='utf-8')
+                    while self.running:
+                        line = f.readline()
+                        if not line: break
+                        try:
+                            # Pass events to the common processor
+                            self._process_event(0, json.loads(line))
+                        except json.JSONDecodeError:
+                            continue
+            except (ConnectionRefusedError, socket.timeout, OSError):
+                # Wait for Go Bridge if it's not yet ready
+                time.sleep(2)
+            except Exception as e:
+                logger.debug(f"Go Bridge Link Connection Error: {e}")
+                time.sleep(2)
+
     def _handle_tcp_client(self, conn, sat_id):
         """Process incoming JSON command streams from ESP32/Alpha."""
         buffer = ""
@@ -92,7 +127,6 @@ class SatelliteNetManager:
                             
                     except json.JSONDecodeError:
                         logger.warning(f"⚠️ Malformed JSON segment from Sat {sat_id}")
-                        # If stuck, clear buffer to prevent infinite loop
                         if len(buffer) > 2048: buffer = ""
                         continue
                     except Exception as e:
@@ -111,8 +145,9 @@ class SatelliteNetManager:
             logger.info(f"🔌 Satellite {sat_id} Offline (TCP Link Severed)")
 
     def _process_event(self, sat_id, evt):
-        """Translates Embedded Hardware Events (JSON) into Hub Actions."""
-        etype = evt.get("event") 
+        """Translates Embedded Hardware or internal Go events into Hub Actions."""
+        # 🟢 FIX: Check both ESP ('event') and Go ('type') keys for cross-platform compatibility
+        etype = evt.get("event") or evt.get("type")
         if not etype: return
 
         try:
@@ -141,6 +176,16 @@ class SatelliteNetManager:
                 logger.info(f"📉 [Event] Calibration Updated [Sat {sat_id}]: {floor}")
                 if hasattr(self.engine, "on_calibration_update"):
                     self.engine.on_calibration_update(sat_id, floor)
+
+            # === 4. PLAYBACK FINISHED (Go Bridge Feedback) ===
+            elif etype == "playback_finished":
+                # Real satellite ID is passed inside the payload from Go
+                target_sat = evt.get("sat_id", sat_id)
+                logger.info(f"✅ [Event] Playback Finished on Sat {target_sat}")
+                
+                # 🟢 FIX: Wipe memory so the duration bug is killed when audio ends naturally
+                if hasattr(self.engine, "state"):
+                    self.engine.state.reset_interruption(target_sat)
 
             elif etype == "satellite_online":
                 logger.info(f"✅ [Event] Satellite {sat_id} Protocol Handshake Successful")
@@ -173,7 +218,6 @@ class SatelliteNetManager:
 class HomeAssistantClient:
     def __init__(self, token, url):
         self.token = token
-        # 🟢 FIX 1: Strip trailing slash to prevent double-slash errors
         self.base_url = url.rstrip('/') 
         self.headers = {
             "Authorization": f"Bearer {self.token}",
@@ -191,16 +235,10 @@ class HomeAssistantClient:
 
         try:
             domain, service = service_call.split(".", 1)
-            
-            # 🟢 FIX 2: Correct URL Construction
-            # Config is '.../api/services', so we append just '/domain/service'
             url = f"{self.base_url}/{domain}/{service}"
-            
             payload = {"entity_id": "all"} 
             
             logger.info(f"🏠 HA Trigger: {domain}.{service} -> {url}")
-            
-            # 🟢 FIX 3: Actually execute the request!
             resp = requests.post(url, headers=self.headers, json=payload, timeout=2)
             
             if resp.status_code not in [200, 201]:

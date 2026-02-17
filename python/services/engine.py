@@ -39,7 +39,7 @@ from core.pi_manager import PiManager
 from .state_manager import EngineState
 from .smart_tts_cache import SmartTTSCache 
 from .transcriber import AudioTranscriber
-# 🟢 FIX: Explicitly import telemetry flag to ensure visibility in threaded reports
+# 🟢 FIX: Explicitly import telemetry flag
 from .config import *
 from .config import ENABLE_LATENCY_TELEMETRY
 
@@ -87,15 +87,17 @@ class SynthetaEngine:
         self.ha = HomeAssistantClient(HA_TOKEN, HA_URL)
         self.emitter = STTEventEmitter()
         
+        # 🟢 UPGRADED: Offloading to VRAM via ASR_DEVICE if configured
         self.transcriber = AudioTranscriber()
         self.brain = SemanticBrain() 
         self.llm = OllamaBridge()
         self.gatekeeper = AudioGatekeeper()
         
         try: 
+            # 🟢 FIX: TTS initialized with CUDA support from config
             self.tts = TTSEngine()
             self.smart_cache = SmartTTSCache(self.tts, CommsShim(self))
-            logger.info("✅ TTS & Smart Cache Online")
+            logger.info("✅ TTS & Smart Cache Online (VRAM Ready)")
         except Exception as e: 
             logger.warning(f"⚠️ TTS Disabled: {e}")
             self.tts = None
@@ -242,7 +244,6 @@ class SynthetaEngine:
 
     def _run_pipeline(self, sat_id, audio_bytes):
         text, confidence, turn_telemetry = self.transcriber.transcribe(audio_bytes)
-        # 🟢 FIX: Record the actual start time in telemetry for total latency calculation
         turn_telemetry["start_time"] = time.perf_counter()
         
         if not text or len(text) < 2 or confidence < 0.4: return
@@ -269,44 +270,51 @@ class SynthetaEngine:
     def _handle_normal_command(self, sat_id, text, telemetry=None):
         if telemetry is None: telemetry = {}
         
-        # 🟢 FIX: RESUME POLICY STATE MACHINE
-        if self.state.resume_pending.get(sat_id):
-             # CLEAR FLAG IMMEDIATELY: Prevents re-confirmation loop
-             self.state.resume_pending[sat_id] = False 
-             
-             clean_input = text.lower()
-             if "yes" in clean_input or "continue" in clean_input:
-                  logger.info(f"✅ User Confirmed Resume for Sat {sat_id}")
-                  self.handle_resume_confirmation(sat_id, True)
-                  return
-             elif "no" in clean_input or "stop" in clean_input:
-                  logger.info(f"🚫 User Declined Resume for Sat {sat_id}")
-                  self.handle_resume_confirmation(sat_id, False)
-                  return
-             else:
-                  # Non-confirming input: re-arm flag to maintain state
-                  logger.warning(f"❓ Ambiguous response to confirmation: {text}")
-                  self.state.resume_pending[sat_id] = True
-
-        # Checkpoint B: Brain Latency
+        # 🟢 LAYER 1: FAST REFLEX (High-Confidence Context Bypass)
         brain_start = time.perf_counter()
         plan = self.pi.process_query(sat_id, text)
         
+        # 🟢 FIX: Allow high-confidence commands to bypass the resume trap
+        if self.state.resume_pending.get(sat_id):
+             score = plan.get("confidence", 0) if plan else 0
+             if score > 0.85:
+                  logger.info(f"⚡ Context Bypass: High-Confidence command '{text}' preempts resume.")
+                  self.state.resume_pending[sat_id] = False
+             else:
+                  # Handle standard resume confirmation
+                  self.state.resume_pending[sat_id] = False 
+                  clean_input = text.lower()
+                  if "yes" in clean_input or "continue" in clean_input:
+                       self.handle_resume_confirmation(sat_id, True)
+                       return
+                  elif "no" in clean_input or "stop" in clean_input:
+                       self.handle_resume_confirmation(sat_id, False)
+                       return
+                  else:
+                       logger.warning(f"❓ Ambiguous response to confirmation: {text}")
+                       self.state.resume_pending[sat_id] = True
+
         if plan and plan.get("intent") == "SUDO_ACCESS":
             self.security_mode = "SUDO_CHALLENGE"
             self.sudo_challenge_deadline = time.time() + 15.0
             self._speak(sat_id, "Did you mean Sudo Access? Say Sudo Login to confirm.")
             return
+            
+        # 🟢 FIX: Prevent internal logic intents from reaching HA execute
         if plan and plan.get("intent") != "unknown":
             telemetry["brain_lat_ms"] = round((time.perf_counter() - brain_start) * 1000, 2)
-            self._execute_plan(sat_id, plan, telemetry)
+            # Internal logic intents like 'CONFIRM_YES' are handled here, not sent to HA
+            if plan.get("intent") not in ["CONFIRM_YES", "CONFIRM_NO"]:
+                self._execute_plan(sat_id, plan, telemetry)
+            else:
+                logger.info(f"🧠 Internal Intent '{plan['intent']}' processed successfully.")
             return
             
         self.state.is_conversation = True
         processed = self.brain.process(text)
         telemetry["brain_lat_ms"] = round((time.perf_counter() - brain_start) * 1000, 2)
         
-        # Checkpoint C: LLM Latency
+        # LLM Pipeline
         llm_start = time.perf_counter()
         self.state.update_context(sat_id, processed['input'], processed['entities'])
         packet = self.state.build_golden_packet(sat_id, processed['input'], processed.get('emotion', 'neutral'))
@@ -325,7 +333,6 @@ class SynthetaEngine:
         interrupted = self.state.interrupted_state.get(sat_id)
         if not interrupted: return
 
-        # 🟢 FIX: Accessing correct keys 'seconds_played' from state_manager snapshot
         resume_file_path = create_resume_file(
             interrupted["file"], 
             interrupted.get("seconds_played", 0), 
@@ -334,7 +341,6 @@ class SynthetaEngine:
 
         if resume_file_path:
             self._speak_file(sat_id, resume_file_path)
-            # Cleanup after successful resumption
             self.state.reset_interruption(sat_id)
 
     def _handle_sudo_command(self, sat_id, text):
@@ -389,7 +395,9 @@ class SynthetaEngine:
              self._close_session(sat_id)
              return
         if plan.get("execute"):
-            self.ha.execute(plan["execute"])
+            # 🟢 FIX: Ensure we only send valid HA strings to HA client
+            if isinstance(plan["execute"], str) and "." in plan["execute"]:
+                self.ha.execute(plan["execute"])
         force_listen = plan.get("force_listen", False)
         if plan.get("speak"):
             self._speak(sat_id, plan["speak"], force_listen, telemetry=telemetry)
@@ -404,7 +412,6 @@ class SynthetaEngine:
                 self._speak_direct(sat_id, text, force_listen, telemetry)
 
     def _speak_direct(self, sat_id, text, force_listen=False, telemetry=None):
-        # Checkpoint D: TTS Latency
         tts_start = time.perf_counter()
         path = self.tts.generate_to_file(text)
         
@@ -438,7 +445,6 @@ class SynthetaEngine:
             threading.Timer(duration + 0.2, lambda: self.comms.send_command(sat_id, {"cmd": "force_listen", "timeout": 4})).start()
 
     def _report_latency(self, tele):
-            # 🟢 FIX: Resolved NameError with explicit import
             if not ENABLE_LATENCY_TELEMETRY: return
             
             stt = tele.get("stt_lat_ms", 0)

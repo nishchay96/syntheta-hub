@@ -2,7 +2,7 @@ import logging
 import sys
 import os
 import json
-import requests  # 🚀 High-speed API communication
+import requests
 
 # 🔧 IMPORT DATA MODELS
 sys.path.append(os.path.join(os.path.dirname(__file__), '../../'))
@@ -11,33 +11,32 @@ from core.data_models import GoldenPacket
 logger = logging.getLogger("LLM")
 
 # ⚙️ CONFIGURATION
-# Optimized model name pointing to your GPU-locked Modelfile
 MODEL_NAME = "syntheta-brain" 
 OLLAMA_API_URL = "http://localhost:11434/api/generate"
 
 class OllamaBridge:
     def __init__(self):
-        # 🟢 UPDATED: Persistent API Mode for sub-3s response
         logger.info(f"LLM Bridge Init | Unified Core: {MODEL_NAME} (Persistent API Mode)")
 
     def _call_ollama_api(self, prompt, system_prompt):
         """
-        🚀 LATENCY FIX: Replaces CLI Subprocess with persistent HTTP API calls.
-        Keeps the model 'warm' in VRAM for near-instant inference.
+        🚀 PERFECTION FIX: Adds keep_alive to prevent VRAM unloading.
+        Ensures the model stays 'hot' on the GPU indefinitely.
         """
         payload = {
             "model": MODEL_NAME,
             "prompt": f"{system_prompt}\n\nUser: {prompt}\nAssistant:",
-            "stream": False,  # Full sentence delivery for optimal TTS timing
+            "stream": False,
+            "keep_alive": -1,  # 🟢 NEW: Keeps model in VRAM forever
             "options": {
                 "num_predict": 100,
                 "temperature": 0.7,
-                "top_p": 0.9
+                "top_p": 0.9,
+                "num_ctx": 4096 # 🟢 NEW: Fixed context size for consistent speed
             }
         }
         
         try:
-            # 🎯 11434 is the default Ollama API port
             response = requests.post(OLLAMA_API_URL, json=payload, timeout=15)
             response.raise_for_status()
             
@@ -51,6 +50,7 @@ class OllamaBridge:
             logger.error(f"Unknown API Error: {e}")
             return None
 
+    # ... (rest of your generate_slm_prompt, generate, and think methods remain identical)
     def generate_slm_prompt(self, packet: GoldenPacket) -> str:
         """
         Phase 4: The Wrapper.

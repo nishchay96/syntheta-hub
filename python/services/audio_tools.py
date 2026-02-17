@@ -9,7 +9,8 @@ TEMP_DIR = os.path.join(BASE_DIR, "assets", "temp")
 
 logger = logging.getLogger("AudioTools")
 
-def cleanup_old_files(max_age_seconds=300):
+# 🟢 FIX: Extended TTL from 300s (5m) to 3600s (1h) to prevent "Source file missing" errors
+def cleanup_old_files(max_age_seconds=3600):
     """Cron-job style cleaner. Deletes WAV files older than max_age_seconds."""
     try:
         if not os.path.exists(TEMP_DIR): 
@@ -23,6 +24,7 @@ def cleanup_old_files(max_age_seconds=300):
             
             filepath = os.path.join(TEMP_DIR, filename)
             try:
+                # 🟢 LOGIC: Files are now persisted for 1 hour to allow for slow user confirmations
                 if os.path.getmtime(filepath) < (now - max_age_seconds):
                     os.remove(filepath)
             except OSError:
@@ -79,6 +81,7 @@ def create_resume_file(original_path, seconds_played, rewind_sec=2.0):
         logger.warning(f"Resume failed: Source file missing '{original_path}'")
         return None
     
+    # This call now respects the new 1-hour default TTL
     cleanup_old_files()
 
     filename = f"resume_{int(time.time())}.wav"

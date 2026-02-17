@@ -14,6 +14,22 @@ import (
 	"time"
 )
 
+// 🟢 FIX: Register the hook from the downlink package on start
+func init() {
+	downlink.OnPlaybackFinished = func(satID int) {
+		event := STTEvent{
+			Type:    "playback_finished",
+			SatID:   satID,
+			Payload: map[string]interface{}{},
+		}
+		data, err := json.Marshal(event)
+		if err == nil {
+			log.Printf("[DISPATCHER] 📢 Notifying Python: Playback Finished (Sat %d)", satID)
+			SendToPython(data)
+		}
+	}
+}
+
 // Global callback to send data down to the Satellite
 var SendToSat func(int, interface{})
 
@@ -112,21 +128,18 @@ func ProcessEvent(data []byte) {
 	}
 
 	// 🔧 FIX: Execute blocking tasks in Goroutines to keep the Dispatcher listening
-	// Event names aligned with Python `engine.py` and `stt_event_emitter.py`
 	switch event.Type {
-	case "wake_ack": // Was "WAKE_ONLY"
+	case "wake_ack":
 		go handleWakeOnly(event, start)
-	case "reflex_action": // Was "reflex_action_done"
+	case "reflex_action":
 		go handleReflexDone(event, start)
-	case "command": // Was "stt_final"
+	case "command":
 		go handleCommand(event, start)
 	case "play_file":
-		// 🔧 CRITICAL: Must be async so we can receive "stop_audio" while playing
 		go handlePlayFile(event, start)
 	case "stop_audio":
-		// 🔧 STOP MUST BE SYNC OR HIGH PRIORITY
 		handleStopAudio(event)
-	case "play_dynamic": // Was "play_dynamic_filler"
+	case "play_dynamic":
 		go handlePlayDynamic(event)
 	case "calibration_cmd":
 		log.Printf("[DISPATCHER] 🔧 Forwarding Calibration Command to Sat %d", event.SatID)
@@ -137,21 +150,17 @@ func ProcessEvent(data []byte) {
 }
 
 func handleWakeOnly(event STTEvent, start time.Time) {
-	// ESP32 handles the "Ding" locally now, so this is mostly for logging
-	// log.Printf("[MONITOR] ⚡ Wake Ack (Latency: %v) -> SILENT (Trusting ESP)", time.Since(start))
+	// ESP32 handles the "Ding" locally now
 }
 
 func handleReflexDone(event STTEvent, start time.Time) {
 	log.Printf("[ACTION] Reflex Executed. Latency: %v", time.Since(start))
 
-	// 1. Tell hardware to stop listening immediately
 	if SendToSat != nil {
 		cmd := map[string]string{"cmd": "stop_listening"}
 		SendToSat(event.SatID, cmd)
 	}
 
-	// 2. Play Acknowledgement Sound Immediately
-	// This uses the 'filler' package to pick a random confirmation sound
 	filler.PlayAckActionDone(event.SatID)
 }
 
@@ -171,10 +180,8 @@ func handlePlayFile(event STTEvent, start time.Time) {
 	}
 	path := pathRaw.(string)
 
-	// Use filepath.Base for cleaner logs (e.g., "response_123.wav" instead of "/full/path/...")
 	log.Printf("[TTS] 🗣️ Playing Generated Response: %s", filepath.Base(path))
 
-	// Calls the robust Downlink engine we fixed in the previous step
 	err := downlink.PlayAudio(event.SatID, path)
 	if err != nil {
 		log.Printf("[DISPATCHER] ❌ Audio Playback Failed: %v", err)
@@ -189,14 +196,10 @@ func handlePlayDynamic(event STTEvent) {
 	filename := filenameRaw.(string)
 
 	log.Printf("[CACHE] 🎭 Playing Dynamic Filler: %s", filename)
-
-	// Fillers are small, cached audio files for latency masking
 	filler.PlayDynamic(event.SatID, filename)
 }
 
-// ✅ HANDLER: BARGE-IN (HUB SIDE ONLY)
 func handleStopAudio(event STTEvent) {
 	log.Printf("[DISPATCHER] 🛑 STOP_AUDIO received. Killing Hub Stream for Sat %d.", event.SatID)
-	// 🟢 FIX: Passed SatID to the downlink engine
 	downlink.StopPlayback(event.SatID)
 }

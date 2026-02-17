@@ -16,6 +16,10 @@ var (
 	GlobalSatServer *SatelliteServer
 	streamMu        sync.RWMutex
 	activeStreams   = make(map[int]context.CancelFunc)
+
+	// 🟢 FIX: Hook for Dispatcher to send events back to Python
+	// Prevents circular import while allowing bidirectional comms.
+	OnPlaybackFinished func(int)
 )
 
 // SatelliteServer handles UDP audio routing and learned IP mapping
@@ -149,7 +153,7 @@ func PlayAudio(satID int, filepath string) error {
 		inputSamples = Resample(inputSamples, int(sampleRate), 16000)
 	}
 
-	// 🔉 50% VOLUME ALIGNMENT: Matching successful test script gain
+	// 🔉 50% VOLUME ALIGNMENT
 	for i := range inputSamples {
 		inputSamples[i] = int16(float64(inputSamples[i]) * 0.5)
 	}
@@ -169,6 +173,7 @@ func PlayAudio(satID int, filepath string) error {
 	delete(activeStreams, satID)
 	streamMu.Unlock()
 
+	// 🟢 FIX: Trigger notification if audio finished naturally
 	if completed {
 		SendPlaybackEnd(satID)
 	}
@@ -186,7 +191,6 @@ func PlayPCM(satID int, data []byte) error {
 	activeStreams[satID] = cancel
 	streamMu.Unlock()
 
-	// No gain reduction here either
 	completed := streamBytesCancellable(ctx, satID, data)
 
 	streamMu.Lock()
@@ -220,8 +224,7 @@ func streamBytesCancellable(ctx context.Context, satID int, data []byte) bool {
 
 	log.Printf("[DOWNLINK] 🚀 Streaming %d bytes (Golden 31.2ms Pace)...", len(data))
 
-	// 🟢 STEP 1: ROBUST WAKE-UP (15 Packets)
-	// Sending 15 packets of silence to ensure the hardware is fully "awake"
+	// 🟢 STEP 1: ROBUST WAKE-UP
 	for k := 0; k < 15; k++ {
 		if listener != nil {
 			listener.WriteToUDP(padding, targetAddr)
@@ -231,7 +234,6 @@ func streamBytesCancellable(ctx context.Context, satID int, data []byte) bool {
 	time.Sleep(50 * time.Millisecond)
 
 	// 🟢 STEP 2: PRECISE STEADY STREAMING
-	// Using 31.2ms to keep the ESP32 buffer "fat" but not overflowing
 	pace := 31200 * time.Microsecond
 	ticker := time.NewTicker(pace)
 	defer ticker.Stop()
@@ -243,11 +245,9 @@ func streamBytesCancellable(ctx context.Context, satID int, data []byte) bool {
 			log.Printf("[DOWNLINK] 🛑 Stream cancelled for Sat %d", satID)
 			return false
 		case <-ticker.C:
-			// Prepare Chunk
 			end := ptr + chunkSize
 			var chunk []byte
 			if end > len(data) {
-				// Final chunk padding
 				lastChunk := data[ptr:]
 				copy(padding, lastChunk)
 				for k := len(lastChunk); k < chunkSize; k++ {
@@ -258,7 +258,6 @@ func streamBytesCancellable(ctx context.Context, satID int, data []byte) bool {
 				chunk = data[ptr:end]
 			}
 
-			// Send Packet
 			if listener != nil {
 				listener.WriteToUDP(chunk, targetAddr)
 			}
@@ -271,9 +270,13 @@ func streamBytesCancellable(ctx context.Context, satID int, data []byte) bool {
 
 func SendPlaybackEnd(satID int) {
 	log.Printf("[DOWNLINK] ✅ Playback Finished for Sat %d", satID)
+	// 🟢 FIX: Call the global hook if registered by the dispatcher
+	if OnPlaybackFinished != nil {
+		OnPlaybackFinished(satID)
+	}
 }
 
-// --- HELPERS (Keep as is) ---
+// --- HELPERS ---
 
 func StereoToMono(input []int16) []int16 {
 	output := make([]int16, len(input)/2)
