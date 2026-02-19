@@ -7,6 +7,8 @@ import (
 	"log"
 	"net"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -17,9 +19,8 @@ var (
 	streamMu        sync.RWMutex
 	activeStreams   = make(map[int]context.CancelFunc)
 
-	// 🟢 FIX: Hook for Dispatcher to send events back to Python
-	// Prevents circular import while allowing bidirectional comms.
-	OnPlaybackFinished func(int)
+	// OnPlaybackFinished is the global hook used by the dispatcher to notify Python
+	OnPlaybackFinished func(int, string)
 )
 
 // SatelliteServer handles UDP audio routing and learned IP mapping
@@ -53,7 +54,7 @@ func (s *SatelliteServer) StartAudioServer(address string) {
 	s.audioListener = conn
 	log.Printf("[DOWNLINK] 🚀 Audio Relay Listening on %s", address)
 
-	// 🔧 ROUTE UPDATE: Aligning with Router Network (192.168.1.x)
+	// 🔧 STATIC ROUTE: Aligning with Router Network
 	s.mu.Lock()
 	if manualAddr, err := net.ResolveUDPAddr("udp", "192.168.1.103:5555"); err == nil {
 		s.activeSatellites[1] = manualAddr
@@ -87,7 +88,7 @@ func (s *SatelliteServer) StartAudioServer(address string) {
 }
 
 func (s *SatelliteServer) StartControlServer(address string) {
-	log.Printf("[DOWNLINK] ⚠️ Control Server (TCP) is managed by Python directly. This is a stub.")
+	log.Printf("[DOWNLINK] ⚠️ Control Server (TCP) is managed by Python directly.")
 }
 
 func StopPlayback(satID int) {
@@ -102,15 +103,29 @@ func StopPlayback(satID int) {
 }
 
 // PlayAudio processes a WAV file and streams it to the satellite
-func PlayAudio(satID int, filepath string) error {
+func PlayAudio(satID int, inputPath string) error {
+	// 🟢 FIX: Absolute Path Resolver
+	// This anchors all relative paths to the confirmed project root
+	projectRoot := "/media/nishchay/Study/syntheta-hub"
+	finalPath := inputPath
+
+	if !filepath.IsAbs(inputPath) {
+		finalPath = filepath.Join(projectRoot, inputPath)
+	}
+
 	defer func() {
-		log.Printf("[DOWNLINK] Cleaning up temp file: %s", filepath)
-		os.Remove(filepath)
+		// 🟢 FIX: Protect permanent assets from auto-deletion using original inputPath check
+		if !strings.Contains(inputPath, "assets/fillers") && !strings.Contains(inputPath, "assets/system") {
+			log.Printf("[DOWNLINK] Cleaning up temp file: %s", finalPath)
+			os.Remove(finalPath)
+		} else {
+			log.Printf("[DOWNLINK] Preserving permanent asset: %s", finalPath)
+		}
 	}()
 
-	file, err := os.Open(filepath)
+	file, err := os.Open(finalPath)
 	if err != nil {
-		log.Printf("[DOWNLINK] Error opening file: %v", err)
+		log.Printf("[DOWNLINK] ❌ Error opening file at %s: %v", finalPath, err)
 		return err
 	}
 
@@ -145,7 +160,7 @@ func PlayAudio(satID int, filepath string) error {
 	pcmData := raw[dataStart:]
 	inputSamples := BytesToInt16(pcmData)
 
-	// Audio Hygiene
+	// Audio Hygiene (Resampling and Channel Mix)
 	if numChannels == 2 {
 		inputSamples = StereoToMono(inputSamples)
 	}
@@ -173,9 +188,9 @@ func PlayAudio(satID int, filepath string) error {
 	delete(activeStreams, satID)
 	streamMu.Unlock()
 
-	// 🟢 FIX: Trigger notification if audio finished naturally
+	// 🟢 FIX: Trigger notification with original inputPath to maintain string matching in Python
 	if completed {
-		SendPlaybackEnd(satID)
+		SendPlaybackEnd(satID, inputPath)
 	}
 
 	return nil
@@ -198,12 +213,12 @@ func PlayPCM(satID int, data []byte) error {
 	streamMu.Unlock()
 
 	if completed {
-		SendPlaybackEnd(satID)
+		SendPlaybackEnd(satID, "PCM_STREAM")
 	}
 	return nil
 }
 
-// streamBytesCancellable: THE "ALMOST SMOOTH" STEADY-STATE SYNC
+// streamBytesCancellable: Steady-State UDP Sync
 func streamBytesCancellable(ctx context.Context, satID int, data []byte) bool {
 	if GlobalSatServer == nil {
 		return false
@@ -264,15 +279,13 @@ func streamBytesCancellable(ctx context.Context, satID int, data []byte) bool {
 			ptr += chunkSize
 		}
 	}
-
 	return true
 }
 
-func SendPlaybackEnd(satID int) {
-	log.Printf("[DOWNLINK] ✅ Playback Finished for Sat %d", satID)
-	// 🟢 FIX: Call the global hook if registered by the dispatcher
+func SendPlaybackEnd(satID int, filename string) {
+	log.Printf("[DOWNLINK] ✅ Playback Finished for Sat %d: %s", satID, filename)
 	if OnPlaybackFinished != nil {
-		OnPlaybackFinished(satID)
+		OnPlaybackFinished(satID, filename)
 	}
 }
 

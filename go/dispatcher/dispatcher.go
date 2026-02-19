@@ -14,17 +14,21 @@ import (
 	"time"
 )
 
-// 🟢 FIX: Register the hook from the downlink package on start
+// 🟢 FIX: Update init to capture the filename from Downlink
 func init() {
-	downlink.OnPlaybackFinished = func(satID int) {
+	downlink.OnPlaybackFinished = func(satID int, filename string) {
 		event := STTEvent{
-			Type:    "playback_finished",
-			SatID:   satID,
-			Payload: map[string]interface{}{},
+			Type:  "playback_finished",
+			SatID: satID,
+			Payload: map[string]interface{}{
+				"file": filename, // 🟢 Payload now includes the filename
+			},
 		}
 		data, err := json.Marshal(event)
 		if err == nil {
-			log.Printf("[DISPATCHER] 📢 Notifying Python: Playback Finished (Sat %d)", satID)
+			// Clean log for easier debugging
+			baseName := filepath.Base(filename)
+			log.Printf("[DISPATCHER] 📢 Notifying Python: Playback Finished (Sat %d) | File: %s", satID, baseName)
 			SendToPython(data)
 		}
 	}
@@ -139,6 +143,11 @@ func ProcessEvent(data []byte) {
 		go handlePlayFile(event, start)
 	case "stop_audio":
 		handleStopAudio(event)
+	case "play_topic_filler":
+		go handlePlayTopicFiller(event)
+	// 🟢 NEW: Handle ambient music request
+	case "play_music":
+		go handlePlayMusic(event)
 	case "play_dynamic":
 		go handlePlayDynamic(event)
 	case "calibration_cmd":
@@ -186,6 +195,30 @@ func handlePlayFile(event STTEvent, start time.Time) {
 	if err != nil {
 		log.Printf("[DISPATCHER] ❌ Audio Playback Failed: %v", err)
 	}
+}
+
+func handlePlayTopicFiller(event STTEvent) {
+	topicRaw, ok := event.Payload["topic"]
+	if !ok {
+		return
+	}
+	topic := topicRaw.(string)
+
+	log.Printf("[CACHE] 🎭 Triggering Context Filler | Topic: %s", topic)
+	filler.PlayTopicFiller(event.SatID, topic)
+}
+
+// 🟢 NEW: Handler for ambient bridge music
+func handlePlayMusic(event STTEvent) {
+	filenameRaw, ok := event.Payload["filename"]
+	if !ok {
+		return
+	}
+	filename := filenameRaw.(string)
+
+	log.Printf("[MUSIC] 🎵 Starting Bridge Music: %s", filename)
+	// We use PlayDynamic to locate the file in assets/fillers/dynamic
+	filler.PlayDynamic(event.SatID, filename)
 }
 
 func handlePlayDynamic(event STTEvent) {

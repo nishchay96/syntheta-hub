@@ -78,7 +78,7 @@ class SatelliteNetManager:
             try:
                 # 🟢 FIX: Connect to Go's internal event broadcaster
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.settimeout(5.0)
+                    s.settimeout(None) # Blocking read is fine here
                     s.connect(("127.0.0.1", 9001))
                     logger.info("🔗 Linked to Go Bridge (Omega Feedback Loop Active)")
                     
@@ -144,52 +144,45 @@ class SatelliteNetManager:
                 del self.active_sockets[sat_id]
             logger.info(f"🔌 Satellite {sat_id} Offline (TCP Link Severed)")
 
+# ... previous code (handle_tcp_client and _process_event) ...
+
     def _process_event(self, sat_id, evt):
         """Translates Embedded Hardware or internal Go events into Hub Actions."""
-        # 🟢 FIX: Check both ESP ('event') and Go ('type') keys for cross-platform compatibility
         etype = evt.get("event") or evt.get("type")
         if not etype: return
 
         try:
-            # === 1. WAKE WORD DETECTED ===
             if etype == "listening":
                 rng_low = evt.get("range_low")
                 rng_high = evt.get("range_high")
-                
-                if rng_low and rng_high:
-                    logger.info(f"⚡ [Event] WAKE WORD from Sat {sat_id} (Dynamic: {rng_low}-{rng_high})")
-                else:
-                    logger.info(f"⚡ [Event] WAKE WORD from Sat {sat_id} (Manual)")
-                
                 if hasattr(self.engine, "on_hardware_wake"):
                     self.engine.on_hardware_wake(sat_id, {"low": rng_low, "high": rng_high} if rng_low else None)
 
-            # === 2. SPEECH END ===
             elif etype == "processing":
-                logger.info(f"🛑 [Event] SPEECH END from Sat {sat_id}")
                 if hasattr(self.engine, "flush_audio"):
                     self.engine.flush_audio(sat_id)
                 
-            # === 3. CALIBRATION ===
             elif etype == "calibration_report":
                 floor = evt.get("floor", 0)
-                logger.info(f"📉 [Event] Calibration Updated [Sat {sat_id}]: {floor}")
                 if hasattr(self.engine, "on_calibration_update"):
                     self.engine.on_calibration_update(sat_id, floor)
 
-            # === 4. PLAYBACK FINISHED (Go Bridge Feedback) ===
             elif etype == "playback_finished":
-                # Real satellite ID is passed inside the payload from Go
                 target_sat = evt.get("sat_id", sat_id)
-                logger.info(f"✅ [Event] Playback Finished on Sat {target_sat}")
-                
-                # 🟢 FIX: Wipe memory so the duration bug is killed when audio ends naturally
-                if hasattr(self.engine, "state"):
-                    self.engine.state.reset_interruption(target_sat)
+                payload = evt.get("payload", {})
+                filename = payload.get("file", "unknown_file")
+                logger.info(f"✅ [Event] Playback Finished on Sat {target_sat}: {filename}")
+                if hasattr(self.engine, "on_playback_finished"):
+                    self.engine.on_playback_finished(target_sat, filename)
 
             elif etype == "satellite_online":
                 logger.info(f"✅ [Event] Satellite {sat_id} Protocol Handshake Successful")
-
+                if hasattr(self.engine, "emitter"):
+                    # 🟢 FIX: Delay the audio by 1 second to let hardware settle
+                    def delayed_warning():
+                        time.sleep(1.0) 
+                        self.engine.emitter.emit("play_file", sat_id, {"filepath": "assets/system/satellite_connect.wav"})
+                    threading.Thread(target=delayed_warning, daemon=True).start()
         except Exception as e:
             logger.error(f"❌ Error processing event '{etype}': {e}", exc_info=True)
 

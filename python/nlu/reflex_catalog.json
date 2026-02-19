@@ -1,71 +1,71 @@
 {
   "commands": [
     {
-      "comment": "================ 🏠 APPLIANCE CONTROL (GENERAL) ================"
+      "comment": "================ 🏠 GENERIC APPLIANCE CONTROL (LOCATION AWARE) ================"
     },
     {
-      "id": "LIGHT_ON_LIVING",
+      "id": "LIGHT_ON",
       "type": "ha",
       "mode": "normal",
-      "phrases": ["turn on living room light", "lights on in living room", "living room lights on"],
-      "strict_aliases": ["living room on", "lights on living"],
-      "payload": { "domain": "light", "service": "turn_on", "entity": "light.living_room" },
-      "reply_template": "Living room lights on."
+      "phrases": ["turn on the light", "lights on", "switch on the light", "it's too dark in here"],
+      "strict_aliases": ["light on", "lights on"],
+      "payload": { "domain": "light", "service": "turn_on", "entity": "context_aware" },
+      "reply_template": "Lights on."
     },
     {
-      "id": "LIGHT_OFF_LIVING",
+      "id": "LIGHT_OFF",
       "type": "ha",
       "mode": "normal",
-      "phrases": ["turn off living room light", "lights off in living room", "living room lights off"],
-      "strict_aliases": ["living room off", "lights off living"],
-      "payload": { "domain": "light", "service": "turn_off", "entity": "light.living_room" },
-      "reply_template": "Living room lights off."
+      "phrases": ["turn off the light", "lights off", "switch off the light", "it's bright enough"],
+      "strict_aliases": ["light off", "lights off"],
+      "payload": { "domain": "light", "service": "turn_off", "entity": "context_aware" },
+      "reply_template": "Lights off."
     },
     {
-      "id": "FAN_ON_BEDROOM",
+      "id": "FAN_ON",
       "type": "ha",
       "mode": "normal",
-      "phrases": ["turn on the bedroom fan", "start the fan", "it's hot in here"],
-      "strict_aliases": ["fan on", "bedroom fan on"],
-      "payload": { "domain": "fan", "service": "turn_on", "entity": "fan.bedroom" },
-      "reply_template": "Bedroom fan started."
+      "phrases": ["turn on the fan", "start the fan", "it's hot", "get some air moving"],
+      "strict_aliases": ["fan on"],
+      "payload": { "domain": "fan", "service": "turn_on", "entity": "context_aware" },
+      "reply_template": "Fan started."
     },
     {
-      "id": "FAN_OFF_BEDROOM",
+      "id": "FAN_OFF",
       "type": "ha",
       "mode": "normal",
-      "phrases": ["turn off the bedroom fan", "stop the fan", "it's too cold"],
-      "strict_aliases": ["fan off", "bedroom fan off"],
-      "payload": { "domain": "fan", "service": "turn_off", "entity": "fan.bedroom" },
-      "reply_template": "Bedroom fan stopped."
+      "phrases": ["turn off the fan", "stop the fan", "it's getting cold"],
+      "strict_aliases": ["fan off"],
+      "payload": { "domain": "fan", "service": "turn_off", "entity": "context_aware" },
+      "reply_template": "Fan stopped."
     },
     {
       "id": "AC_SET_TEMP",
       "type": "ha",
       "mode": "normal",
-      "phrases": ["set ac to 24", "make it 24 degrees", "change temperature to 24"],
-      "payload": { "domain": "climate", "service": "set_temperature", "entity": "climate.main_ac", "temp": 24 },
-      "reply_template": "AC set to 24 degrees."
+      "phrases": ["set temperature", "change the ac", "make it cooler", "adjust the climate"],
+      "payload": { "domain": "climate", "service": "set_temperature", "entity": "context_aware" },
+      "reply_template": "Adjusting the climate."
     },
     {
-      "id": "TV_ON",
+      "id": "TV_CONTROL",
       "type": "ha",
       "mode": "normal",
-      "phrases": ["turn on the tv", "start the television", "let's watch something"],
-      "strict_aliases": ["tv on"],
-      "payload": { "domain": "media_player", "service": "turn_on", "entity": "media_player.living_room_tv" },
-      "reply_template": "TV is on."
+      "phrases": ["turn on the tv", "watch television", "stop the tv", "tv off"],
+      "strict_aliases": ["tv on", "tv off"],
+      "payload": { "domain": "media_player", "service": "toggle", "entity": "context_aware" },
+      "reply_template": "Updating media state."
     },
 
     {
-      "comment": "================ 🤖 SYSTEM REFLEXES (UNIVERSAL) ================"
+      "comment": "================ 🤖 SYSTEM CORE (UNIVERSAL) ================"
     },
     {
       "id": "STOP",
       "type": "sys",
       "mode": "normal",
-      "phrases": ["stop", "stop talking", "shut up", "cancel", "terminate", "quiet"],
-      "strict_aliases": ["stop", "shut up", "silence", "quiet", "cancel", "halt"],
+      "phrases": ["stop", "shut up", "cancel", "quiet", "terminate", "halt"],
+      "strict_aliases": ["stop", "cancel", "silence"],
       "payload": { "action": "stop_audio" },
       "reply_template": "Stopped."
     },
@@ -73,104 +73,103 @@
       "id": "CONFIRM_YES",
       "type": "sys",
       "mode": "normal",
-      "phrases": ["yes", "yeah", "yep", "sure", "do it", "correct", "please", "go ahead"],
-      "strict_aliases": ["yes", "y", "ok", "okay", "sure", "do it"],
+      "phrases": ["yes", "yeah", "sure", "do it", "correct", "go ahead", "please"],
+      "strict_aliases": ["yes", "ok", "yep"],
       "payload": { "action": "confirm_yes" },
-      "reply_template": "Okay."
+      "reply_template": "Confirmed."
     },
     {
       "id": "CONFIRM_NO",
       "type": "sys",
       "mode": "normal",
-      "phrases": ["no", "nope", "wrong", "don't", "cancel", "nevermind"],
-      "strict_aliases": ["no", "n", "nope", "cancel", "abort"],
+      "phrases": ["no", "nope", "wrong", "don't", "nevermind", "abort"],
+      "strict_aliases": ["no", "cancel"],
       "payload": { "action": "confirm_no" },
       "reply_template": "Cancelled."
     },
-    {
-      "id": "CONVERSATION_MODE",
-      "type": "sys",
-      "mode": "normal",
-      "phrases": ["let's chat", "can we talk", "conversation mode", "i want to discuss something"],
-      "strict_aliases": ["chat mode", "let's talk"],
-      "payload": { "action": "enter_chat" },
-      "reply_template": "I'm listening."
-    },
-    {
-      "id": "UPDATE_MACRO",
-      "type": "sys",
-      "mode": "normal",
-      "phrases": ["update system", "start calibration", "fix audio", "maintenance mode"],
-      "strict_aliases": ["update system", "calibrate"],
-      "payload": { "action": "run_update_macro" },
-      "reply_template": "Starting system maintenance."
-    },
 
     {
-      "comment": "================ 🔐 SUDO ZONE (RESTRICTED) ================"
+      "comment": "================ 🔐 SUDO OPERATIONS (RESTRICTED) ================"
     },
     {
       "id": "SUDO_ACCESS",
       "type": "sys",
       "mode": "normal",
-      "phrases": ["sudo access", "admin mode", "root access"],
-      "strict_aliases": ["sudo access", "root"],
+      "phrases": ["sudo access", "admin mode", "root terminal"],
+      "strict_aliases": ["sudo access"],
       "payload": { "action": "trigger_sudo_challenge" },
       "reply_template": "Security Challenge Initiated."
-    },
-    {
-      "id": "SUDO_LOGIN",
-      "type": "sys",
-      "mode": "sudo_challenge",
-      "phrases": ["sudo login"],
-      "strict_aliases": ["sudo login"],
-      "payload": { "action": "verify_sudo_login" },
-      "reply_template": "Verifying Environment..."
     },
     {
       "id": "SUDO_REBOOT",
       "type": "sudo",
       "mode": "sudo",
-      "phrases": ["system reboot", "reboot the core", "restart syntheta"],
-      "strict_aliases": ["system reboot", "reboot"],
+      "phrases": ["reboot system", "restart core", "cycle power"],
+      "strict_aliases": ["reboot"],
       "payload": { "action": "reboot_host" },
-      "reply_template": "Rebooting Host Machine."
+      "reply_template": "Rebooting."
+    }
+  ],
+
+  "meta_topics": [
+    {
+      "id": "TOPIC_SCIENTIFIC",
+      "phrases": [
+        "explain how physics works", "what is a galaxy", "calculate the mass", 
+        "tell me about biology", "how does a computer work", "solve this math problem",
+        "quantum entanglement", "astronomy facts"
+      ],
+      "filler_category": "scientific",
+      "note": "Triggers high-tech analytical fillers and ambient synth music."
     },
     {
-      "id": "SUDO_SHUTDOWN",
-      "type": "sudo",
-      "mode": "sudo",
-      "phrases": ["system shutdown", "power off", "kill power"],
-      "strict_aliases": ["system shutdown", "shutdown"],
-      "payload": { "action": "shutdown_host" },
-      "reply_template": "Powering down."
+      "id": "TOPIC_FICTIONAL",
+      "phrases": [
+        "tell me a story", "create a character", "once upon a time", 
+        "write a poem", "what happens in the sequel", "tell me a legend",
+        "build a fantasy world", "sci-fi lore"
+      ],
+      "filler_category": "fictional",
+      "note": "Triggers whimsical storytelling fillers and orchestral ambient music."
     },
     {
-      "id": "SUDO_UPDATE_CODE",
-      "type": "sudo",
-      "mode": "sudo",
-      "phrases": ["force update", "git pull", "update software"],
-      "strict_aliases": ["force update", "update code"],
-      "payload": { "action": "git_pull_rebuild" },
-      "reply_template": "Executing Force Update."
+      "id": "TOPIC_EMOTIONAL",
+      "phrases": [
+        "i feel lonely", "give me some advice", "why is life like this", 
+        "talk to me", "i'm having a bad day", "how do I handle stress",
+        "philosophy of happiness", "let's vent"
+      ],
+      "filler_category": "emotional",
+      "note": "Triggers empathetic, slow fillers and soft piano music."
     },
     {
-      "id": "SUDO_WIPE_MEMORY",
-      "type": "sudo",
-      "mode": "sudo",
-      "phrases": ["wipe memory", "clear context", "forget everything"],
-      "strict_aliases": ["wipe memory", "format brain"],
-      "payload": { "action": "clear_context" },
-      "reply_template": "Memory Wiped."
+      "id": "TOPIC_POLITICAL",
+      "phrases": [
+        "what is happening in the news", "global politics", "history of war", 
+        "social issues", "government policy", "international relations",
+        "current events update", "who is the president"
+      ],
+      "filler_category": "political",
+      "note": "Triggers neutral, data-gathering fillers and steady percussive music."
     },
     {
-      "id": "SUDO_EXIT",
-      "type": "sudo",
-      "mode": "sudo",
-      "phrases": ["exit sudo", "close root", "return to normal"],
-      "strict_aliases": ["exit", "quit", "logout"],
-      "payload": { "action": "exit_sudo" },
-      "reply_template": "Exiting Sudo Mode."
+      "id": "TOPIC_SYNTHETA_HELP",
+      "phrases": [
+        "i need help with syntheta", "how do I use this", "my light isn't working", 
+        "syntheta is slow", "fix my settings", "troubleshoot connection",
+        "system status help", "commands list"
+      ],
+      "filler_category": "technical",
+      "note": "Triggers system-diagnostic fillers. Expansion point for local troubleshooting logic."
+    },
+    {
+      "id": "TOPIC_GENERAL",
+      "phrases": [
+        "hello", "how are you", "what time is it", "tell me a joke",
+        "who are you", "general chat", "what is the weather", "good morning"
+      ],
+      "filler_category": "general",
+      "note": "Catch-all for simple interactions or when vector similarity is low."
     }
   ]
 }

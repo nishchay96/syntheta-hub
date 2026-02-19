@@ -125,6 +125,25 @@ def main():
     term_cmd = check_terminal_installed()
     ensure_ollama_ready()
 
+    # 1. REFRESH KNOWLEDGE (The Librarian Crawler)
+    # 🟢 NEW: Run the crawler to update ChromaDB vectors before launching services
+    log("Refreshing OMEGA Memory (BGE-M3 Librarian)...", "BOOT")
+    crawler_path = os.path.join(PY_DIR, "tools", "code_crawler.py")
+    
+    if os.path.exists(crawler_path):
+        try:
+            subprocess.run(
+                [VENV_PYTHON, crawler_path], 
+                cwd=PY_DIR, 
+                check=True
+            )
+            log("✅ Memory Refresh Successful.", "INFO")
+        except subprocess.CalledProcessError as e:
+            log(f"⚠️ Knowledge Refresh Failed: {e}", "WARN")
+            log("Continuing with existing database...", "INFO")
+    else:
+        log("Librarian script not found. Skipping memory refresh.", "WARN")
+
     # 2. COMPILE GO (Corrected for go/cmd structure)
     log("Compiling Go Hub from Module Root...", "BOOT")
     try:

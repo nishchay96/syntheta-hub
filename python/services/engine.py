@@ -32,14 +32,14 @@ except ImportError:
     except ImportError:
         from audio.stt_event_emitter import STTEventEmitter
 
+from core.knowledge_manager import KnowledgeManager
 from core.gatekeeper import AudioGatekeeper
 from nlu.llm_bridge import OllamaBridge
 from nlu.semantic_brain import SemanticBrain 
 from core.pi_manager import PiManager
 from .state_manager import EngineState
-from .smart_tts_cache import SmartTTSCache 
 from .transcriber import AudioTranscriber
-# 🟢 FIX: Explicitly import telemetry flag
+
 from .config import *
 from .config import ENABLE_LATENCY_TELEMETRY
 
@@ -52,8 +52,8 @@ logger = logging.getLogger("SynthetaEngine")
 # ============================================
 # 🔧 TUNING PARAMETERS
 # ============================================
-LIMIT_REFLEX = 40.0        
-LIMIT_CONVERSATION = 120.0 
+LIMIT_REFLEX = 40.0         
+LIMIT_CONVERSATION = 120.0  
 SESSION_IDLE_TIMEOUT = 10.0
 WAKE_COLLISION_SKIP_BYTES = 16000 
 PCM_BYTES_PER_SEC = 32000
@@ -66,12 +66,6 @@ DEFAULT_HALLUCINATIONS = [
     "subtitles", "copyright", "audio", "video", "subscribe", 
     "watching", "bye", "amara", "org"
 ]
-
-class CommsShim:
-    def __init__(self, engine): self.engine = engine
-    def emit(self, event, sat_id, payload):
-        if self.engine.comms:
-            pass 
 
 # ============================================
 # 🧠 MAIN ENGINE (OMEGA V2.5 - COGNITIVE)
@@ -87,21 +81,27 @@ class SynthetaEngine:
         self.ha = HomeAssistantClient(HA_TOKEN, HA_URL)
         self.emitter = STTEventEmitter()
         
-        # 🟢 UPGRADED: Offloading to VRAM via ASR_DEVICE if configured
         self.transcriber = AudioTranscriber()
         self.brain = SemanticBrain() 
         self.llm = OllamaBridge()
         self.gatekeeper = AudioGatekeeper()
         
         try: 
-            # 🟢 FIX: TTS initialized with CUDA support from config
+            # 🟢 PURE TTS: Direct engine without caching layer
             self.tts = TTSEngine()
-            self.smart_cache = SmartTTSCache(self.tts, CommsShim(self))
-            logger.info("✅ TTS & Smart Cache Online (VRAM Ready)")
+            logger.info("✅ TTS Engine Online (VRAM Optimized)")
         except Exception as e: 
             logger.warning(f"⚠️ TTS Disabled: {e}")
             self.tts = None
-            self.smart_cache = None
+        
+                # 🟢 NEW: Initialize Knowledge Manager (RAG with BGE-M3 + Reranker)
+        try:
+            self.knowledge = KnowledgeManager()
+            logger.info("✅ OMEGA Knowledge Engine Online (BGE-M3 + Reranker)")
+        except Exception as e:
+            logger.error(f"❌ Knowledge Engine failed: {e}")
+            self.knowledge = None
+
 
         self.security_mode = "NORMAL" 
         self.sudo_timer = 0
@@ -111,6 +111,9 @@ class SynthetaEngine:
         self.ghost_counters = {} 
 
         self.wwd_timers = {} 
+        
+        # 🟢 State flag for Music Bridge logic
+        self.is_thinking = False
         
         threading.Thread(target=self._processing_loop, daemon=True).start()
         threading.Thread(target=self._monitor_loop, daemon=True).start()
@@ -158,6 +161,24 @@ class SynthetaEngine:
 
     def on_calibration_update(self, sat_id, floor):
         self.gatekeeper.update_calibration(sat_id, floor)
+
+    def on_playback_finished(self, sat_id, filename):
+        base_file = os.path.basename(filename)
+        logger.info(f"🎵 Playback Finished [Sat {sat_id}]: {base_file}")
+        
+        if "satellite_connect" in base_file:
+            logger.info(f"📢 Calibration Warning Finished. Waiting for room silence...")
+            time.sleep(1.5) 
+            
+            if self.comms:
+                logger.info(f"⚙️ Sending Calibration Command to Sat {sat_id}")
+                self.comms.send_command(sat_id, {"cmd": "calibrate"})
+            return
+
+        # 🟢 MUSIC BRIDGE: Triggers if filler ends while LLM is still 'thinking'
+        if "filler_" in base_file and self.is_thinking:
+            logger.info(f"⏳ Filler finished but LLM is thinking. Bridging with music.")
+            self.emitter.emit("play_music", sat_id, {"filename": "bridge.wav"})
 
     def queue_audio(self, sat_id, pcm):
         self.state.last_active_time[sat_id] = time.time()
@@ -270,59 +291,78 @@ class SynthetaEngine:
     def _handle_normal_command(self, sat_id, text, telemetry=None):
         if telemetry is None: telemetry = {}
         
-        # 🟢 LAYER 1: FAST REFLEX (High-Confidence Context Bypass)
+        # 🟢 STEP 1: Cognitive Pre-Processing & Topic Classification
         brain_start = time.perf_counter()
+        processed = self.brain.process(text)
+        topic = processed.get('topic')
+        telemetry["brain_lat_ms"] = round((time.perf_counter() - brain_start) * 1000, 2)
+
+        # 🟢 STEP 2: Knowledge Retrieval (BGE-M3 + Reranker)
+        # Search the ChromaDB for relevant project files
+        knowledge_start = time.perf_counter()
+        context = self.knowledge.get_context(text)
+        telemetry["rag_lat_ms"] = round((time.perf_counter() - knowledge_start) * 1000, 2)
+
+        # 🟢 STEP 3: Reflex & Unified Confirmation Check
         plan = self.pi.process_query(sat_id, text)
         
-        # 🟢 FIX: Allow high-confidence commands to bypass the resume trap
-        if self.state.resume_pending.get(sat_id):
-             score = plan.get("confidence", 0) if plan else 0
-             if score > 0.85:
-                  logger.info(f"⚡ Context Bypass: High-Confidence command '{text}' preempts resume.")
-                  self.state.resume_pending[sat_id] = False
-             else:
-                  # Handle standard resume confirmation
-                  self.state.resume_pending[sat_id] = False 
-                  clean_input = text.lower()
-                  if "yes" in clean_input or "continue" in clean_input:
-                       self.handle_resume_confirmation(sat_id, True)
-                       return
-                  elif "no" in clean_input or "stop" in clean_input:
-                       self.handle_resume_confirmation(sat_id, False)
-                       return
-                  else:
-                       logger.warning(f"❓ Ambiguous response to confirmation: {text}")
-                       self.state.resume_pending[sat_id] = True
+        if plan:
+            intent = plan.get("intent")
+            
+            if intent == "RESUME_CONFIRMED":
+                logger.info(f"✅ State Sync: Resume confirmed for Sat {sat_id}")
+                self.handle_resume_confirmation(sat_id, True)
+                return
+            if intent == "RESUME_CANCELLED":
+                logger.info(f"❌ State Sync: Resume cancelled for Sat {sat_id}")
+                self.handle_resume_confirmation(sat_id, False)
+                return
 
-        if plan and plan.get("intent") == "SUDO_ACCESS":
-            self.security_mode = "SUDO_CHALLENGE"
-            self.sudo_challenge_deadline = time.time() + 15.0
-            self._speak(sat_id, "Did you mean Sudo Access? Say Sudo Login to confirm.")
-            return
-            
-        # 🟢 FIX: Prevent internal logic intents from reaching HA execute
-        if plan and plan.get("intent") != "unknown":
-            telemetry["brain_lat_ms"] = round((time.perf_counter() - brain_start) * 1000, 2)
-            # Internal logic intents like 'CONFIRM_YES' are handled here, not sent to HA
-            if plan.get("intent") not in ["CONFIRM_YES", "CONFIRM_NO"]:
+            if intent and intent != "unknown":
+                if intent == "RECOGNITION_QUESTION" and topic:
+                     logger.info(f"⏳ Ambiguous reflex match. Triggering Topic Filler: {topic}")
+                     self.emitter.emit("play_topic_filler", sat_id, {"topic": topic})
+                
                 self._execute_plan(sat_id, plan, telemetry)
-            else:
-                logger.info(f"🧠 Internal Intent '{plan['intent']}' processed successfully.")
-            return
-            
+                return
+
+        # 🟢 STEP 4: Cognitive Path (LLM with Injected Context)
         self.state.is_conversation = True
-        processed = self.brain.process(text)
-        telemetry["brain_lat_ms"] = round((time.perf_counter() - brain_start) * 1000, 2)
         
+        # Trigger Topic Filler immediately for the thinking phase
+        if topic:
+             logger.info(f"⏳ Triggering Topic Filler for: {topic}")
+             self.emitter.emit("play_topic_filler", sat_id, {"topic": topic})
+
         # LLM Pipeline
+        self.is_thinking = True 
         llm_start = time.perf_counter()
-        self.state.update_context(sat_id, processed['input'], processed['entities'])
-        packet = self.state.build_golden_packet(sat_id, processed['input'], processed.get('emotion', 'neutral'))
-        llm_response = self.llm.generate(packet)
-        telemetry["llm_lat_ms"] = round((time.perf_counter() - llm_start) * 1000, 2)
         
-        self.state.commit_assistant_response(sat_id, llm_response)
-        self._speak(sat_id, llm_response, telemetry=telemetry)
+        # Enforce "Knowledge" by wrapping the user input with retrieved context
+        enriched_input = processed['input']
+        if context:
+            logger.info(f"📚 Injecting {len(context.split('--- FILE:')) - 1} code chunks into prompt.")
+            enriched_input = (
+                f"Use the following project context to answer the user query.\n\n"
+                f"CONTEXT FROM PROJECT FILES:\n{context}\n\n"
+                f"USER QUERY: {processed['input']}"
+            )
+        
+        self.state.update_context(sat_id, processed['input'], processed['entities'])
+        packet = self.state.build_golden_packet(sat_id, enriched_input, processed.get('emotion', 'neutral'))
+        
+        try:
+            llm_response = self.llm.generate(packet)
+            telemetry["llm_lat_ms"] = round((time.perf_counter() - llm_start) * 1000, 2)
+            
+            self.is_thinking = False 
+            self.state.commit_assistant_response(sat_id, llm_response)
+            self._speak(sat_id, llm_response, telemetry=telemetry)
+            
+        except Exception as e:
+            logger.error(f"❌ LLM Pipeline Error: {e}")
+            self.is_thinking = False
+            self._speak(sat_id, "I'm having trouble connecting to my brain right now.")
 
     def handle_resume_confirmation(self, sat_id, confirmed=True):
         if not confirmed:
@@ -395,7 +435,6 @@ class SynthetaEngine:
              self._close_session(sat_id)
              return
         if plan.get("execute"):
-            # 🟢 FIX: Ensure we only send valid HA strings to HA client
             if isinstance(plan["execute"], str) and "." in plan["execute"]:
                 self.ha.execute(plan["execute"])
         force_listen = plan.get("force_listen", False)
@@ -405,11 +444,9 @@ class SynthetaEngine:
             self.comms.send_command(sat_id, {"cmd": "force_listen", "timeout": 4})
 
     def _speak(self, sat_id, text, force_listen=False, telemetry=None):
+        # 🟢 PURE SPEECH: Cache layer removed, goes direct to tts_engine
         if self.tts:
-            if self.smart_cache:
-                self.smart_cache.process_and_speak(sat_id, text, lambda t: self._speak_direct(sat_id, t, force_listen, telemetry))
-            else:
-                self._speak_direct(sat_id, text, force_listen, telemetry)
+            self._speak_direct(sat_id, text, force_listen, telemetry)
 
     def _speak_direct(self, sat_id, text, force_listen=False, telemetry=None):
         tts_start = time.perf_counter()
@@ -449,6 +486,7 @@ class SynthetaEngine:
             
             stt = tele.get("stt_lat_ms", 0)
             brain = tele.get("brain_lat_ms", 0)
+            rag = tele.get("rag_lat_ms", 0) # 🟢 NEW
             llm = tele.get("llm_lat_ms", 0)
             tts = tele.get("tts_lat_ms", 0)
             
@@ -459,7 +497,8 @@ class SynthetaEngine:
             print(f"📊 OMEGA PERFORMANCE REPORT (Total: {total}ms)")
             print("-" * 45)
             print(f" 🟢 STT (Whisper):   {stt:>7} ms")
-            print(f" 🔵 Brain (NLU):   {brain:>7} ms")
-            print(f" 🟣 LLM (Ollama):  {llm:>7} ms")
-            print(f" 🟠 TTS (Kokoro):  {tts:>7} ms")
+            print(f" 🔵 Brain (NLU):     {brain:>7} ms")
+            print(f" 📚 RAG (BGE-M3):    {rag:>7} ms") # 🟢 NEW
+            print(f" 🟣 LLM (Ollama):    {llm:>7} ms")
+            print(f" 🟠 TTS (Kokoro):    {tts:>7} ms")
             print("="*45 + "\n")

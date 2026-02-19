@@ -17,18 +17,24 @@ func main() {
 	satServer := downlink.NewSatelliteServer()
 
 	// 2. Wiring
+	// Since Python handles TCP 5556, Go has no direct control lane to the Satellite.
+	// We leave this as a no-op placeholder.
 	dispatcher.SendToSat = func(satID int, payload interface{}) {
-		// Placeholder
+		// Placeholder: Go cannot send TCP commands in this architecture.
+		// Use Python's SatelliteNetManager for that.
 	}
 
 	// 3. START LANES
 	// 🟢 CRITICAL: This line MUST be active for Audio to work!
+	// It handles UDP 5555 (Inbound from Mic) -> UDP 6000 (Outbound to Python)
 	go satServer.StartAudioServer("0.0.0.0:5555")
 
 	// 🔴 CRITICAL: This line MUST be commented out to free Port 5556 for Python!
+	// Python needs exclusive access to the TCP Control Plane.
 	// go satServer.StartControlServer("0.0.0.0:5556")
 
 	// 4. Internal Event Bus
+	// This listens on TCP 9001 for commands from Python (e.g., "play_topic_filler")
 	go func() {
 		log.Println("[BOOT] 🚀 Starting Dispatcher on Port 9001...")
 		if err := dispatcher.StartSTTEventListener("0.0.0.0:9001"); err != nil {
@@ -36,7 +42,8 @@ func main() {
 		}
 	}()
 
-	// 5. Pre-load
+	// 5. Pre-load Assets
+	// Plays a silent/dummy sound to force the Asset Loader to initialize
 	go filler.PlayAckActionDone(0)
 
 	// ================================================
@@ -50,8 +57,10 @@ func main() {
 	for scanner.Scan() {
 		text := strings.TrimSpace(strings.ToLower(scanner.Text()))
 		if text == "r" {
+			log.Println("[CMD] Reboot Requested...")
 			os.Exit(42)
 		} else if text == "q" {
+			log.Println("[CMD] Shutdown Requested...")
 			os.Exit(0)
 		}
 	}

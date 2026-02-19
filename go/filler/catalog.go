@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 )
 
 // Category defines the folder name in assets/fillers/
@@ -17,14 +16,28 @@ type Category string
 const (
 	AckActionDone Category = "action"
 	DynamicFiller Category = "dynamic"
+
+	// Topic-Based Categories
+	Scientific Category = "scientific"
+	Fictional  Category = "fictional"
+	Emotional  Category = "emotional"
+	Political  Category = "political"
+	Technical  Category = "technical"
+	General    Category = "general"
+	Help       Category = "help"
+
+	// System Voice Notes
+	SystemNote Category = "../system"
 )
 
 // 🔧 PATH CONFIGURATION
-// Assumes you run the binary from the project root (syntheta-hub/)
-var basePath = "assets/fillers"
+var basePath string
 
+// Inside catalog.go
 func init() {
-	rand.Seed(time.Now().UnixNano())
+	// Force the path to the one you confirmed with 'ls'
+	basePath = "/media/nishchay/Study/syntheta-hub/assets/fillers"
+	log.Printf("[FILLER] 📂 Asset Base Path LOCKED to: %s", basePath)
 }
 
 // PlayAckActionDone plays a random sound from assets/fillers/action/
@@ -32,10 +45,20 @@ func PlayAckActionDone(satID int) {
 	playCategory(satID, AckActionDone)
 }
 
+// PlayTopicFiller picks a random filler based on the Semantic Brain's classification
+func PlayTopicFiller(satID int, topic string) {
+	cat := Category(strings.ToLower(topic))
+	playCategory(satID, cat)
+}
+
+// PlaySystemNote plays a specific system announcement
+func PlaySystemNote(satID int, noteName string) {
+	path := filepath.Join(basePath, string(SystemNote), noteName+".wav")
+	playSafe(satID, path)
+}
+
 // PlayDynamic plays a specific named file from assets/fillers/dynamic/
-// 🟢 FIX 1: Renamed from 'PlayDynamicFiller' to match Dispatcher call
 func PlayDynamic(satID int, filename string) error {
-	// Security: Prevent directory traversal
 	cleanName := filepath.Base(filename)
 	path := filepath.Join(basePath, "dynamic", cleanName)
 
@@ -52,18 +75,18 @@ func PlayDynamic(satID int, filename string) error {
 func playCategory(satID int, cat Category) {
 	path, err := pickRandom(cat)
 	if err != nil {
-		// It's common for folders to be empty initially, so we just return silently
+		// log.Printf("[FILLER] ⚠️ Could not find asset in category %s: %v", cat, err)
 		return
 	}
 	playSafe(satID, path)
 }
 
 func playSafe(satID int, path string) error {
-	log.Printf("[FILLER] 🎭 Sat %d -> Asset: %s", satID, filepath.Base(path))
-
-	// 🟢 OPTIMIZATION:
-	// We delegate the heavy lifting to the Downlink engine.
-	// It already knows how to read WAV headers, resample, and stream.
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		log.Printf("[FILLER] ❌ File Missing: %s", path)
+		return err
+	}
+	log.Printf("[FILLER] 🎭 Sat %d -> Streaming Topic Asset: %s", satID, filepath.Base(path))
 	return downlink.PlayAudio(satID, path)
 }
 
@@ -72,8 +95,7 @@ func pickRandom(category Category) (string, error) {
 
 	// Create directory if it doesn't exist (prevents crashes)
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
-		os.MkdirAll(dir, 0755)
-		return "", errors.New("directory created, empty")
+		return "", errors.New("directory does not exist")
 	}
 
 	entries, err := os.ReadDir(dir)
