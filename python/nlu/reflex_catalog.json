@@ -166,10 +166,56 @@
       "id": "TOPIC_GENERAL",
       "phrases": [
         "hello", "how are you", "what time is it", "tell me a joke",
-        "who are you", "general chat", "what is the weather", "good morning"
+        "general chat", "what is the weather", "good morning"
       ],
       "filler_category": "general",
       "note": "Catch-all for simple interactions or when vector similarity is low."
+    },
+    {
+      "id": "TOPIC_SYNTHETA_CORE",
+      "phrases": [
+        "how does your backend work", 
+        "explain your logic flow", 
+        "what is your system architecture", 
+        "show me your python code",
+        "how is the database implemented", 
+        "debug the c firmware",
+        "explain the app_audio.c file", 
+        "what is your memory database",
+        "check the go dispatcher script",
+        "how is the stt event emitter structured",
+        "why is the esp32 wake word failing",
+        "read the engine dot py file",
+        "analyze the audio buffer logic",
+        "what does the knowledge manager do",
+        "how does the bluetooth bridge connect",
+        "look at the main go file",
+        "explain the state manager code"
+      ],
+      "filler_category": "syntheta",
+      "note": "Strict trigger for codebase RAG search. Heavily weighted with engineering and code terminology."
+    },
+    {
+      "id": "TOPIC_PERSONA",
+      "phrases": [
+        "tell me about yourself", 
+        "who are you", 
+        "what is your history", 
+        "what can you do", 
+        "introduce yourself", 
+        "what are your capabilities",
+        "who created you",
+        "why were you named eva originally",
+        "what is your main purpose",
+        "are you an ai or a person",
+        "tell me about your creator nishchay",
+        "what is the omega hub",
+        "do you have a physical body",
+        "what are your hardware phases",
+        "how do you help around the house"
+      ],
+      "filler_category": "persona",
+      "note": "Triggers the in-memory Lore Book injection. Weighted with identity, history, and purpose vocabulary."
     }
   ]
 }

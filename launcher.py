@@ -55,11 +55,15 @@ def get_brain_env(audio_site_path):
     env["PATH"] = os.path.join(VENV_PATH, "bin") + os.pathsep + env.get("PATH", "")
     current_pp = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = f"{audio_site_path}{os.pathsep}{current_pp}" if current_pp else audio_site_path
+    
+    # Existing Offline Enforcements
     env["HF_HUB_OFFLINE"] = "1" 
     env["TRANSFORMERS_OFFLINE"] = "1"
-    env["CUDA_VISIBLE_DEVICES"] = "-1"
+    
+    # 🟢 NEW FIX: Nuke ChromaDB Telemetry to prevent boot hangs
+    env["CHROMA_TELEMETRY"] = "false" 
+    
     return env
-
 def check_terminal_installed():
     terms = ["gnome-terminal", "xfce4-terminal", "konsole", "x-terminal-emulator", "xterm"]
     for t in terms:

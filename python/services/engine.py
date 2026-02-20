@@ -291,17 +291,36 @@ class SynthetaEngine:
     def _handle_normal_command(self, sat_id, text, telemetry=None):
         if telemetry is None: telemetry = {}
         
-        # 🟢 STEP 1: Cognitive Pre-Processing & Topic Classification
+        # 🟢 STEP 1: Cognitive Pre-Processing
         brain_start = time.perf_counter()
         processed = self.brain.process(text)
         topic = processed.get('topic')
         telemetry["brain_lat_ms"] = round((time.perf_counter() - brain_start) * 1000, 2)
 
-        # 🟢 STEP 2: Knowledge Retrieval (BGE-M3 + Reranker)
-        # Search the ChromaDB for relevant project files
-        knowledge_start = time.perf_counter()
-        context = self.knowledge.get_context(text)
-        telemetry["rag_lat_ms"] = round((time.perf_counter() - knowledge_start) * 1000, 2)
+        # 🟢 STEP 2: SEMANTIC ROUTING (The Traffic Cop)
+        context = ""
+        
+        # Route A: The Lore Book (0ms Latency for Identity)
+        if topic == "persona":
+            logger.info("📖 Semantic Router: Injecting Syntheta Lore Book...")
+            lore_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../nlu/syntheta_lore.md'))
+            try:
+                with open(lore_path, 'r', encoding='utf-8') as f:
+                    context = f.read()
+            except Exception as e:
+                logger.warning(f"⚠️ Lore Book not found: {e}")
+            telemetry["rag_lat_ms"] = 0
+
+        # Route B: The Vector DB (Only for Codebase/Technical Queries)
+        elif self.knowledge and topic == "syntheta":
+            knowledge_start = time.perf_counter()
+            logger.info("🔍 Semantic Router: Routing to RAG Database...")
+            context = self.knowledge.get_context(text, top_k=5, rerank_k=2) 
+            telemetry["rag_lat_ms"] = round((time.perf_counter() - knowledge_start) * 1000, 2)
+            
+        # Route C: General Chat (Bypass Context entirely)
+        else:
+            telemetry["rag_lat_ms"] = 0
 
         # 🟢 STEP 3: Reflex & Unified Confirmation Check
         plan = self.pi.process_query(sat_id, text)
@@ -326,44 +345,45 @@ class SynthetaEngine:
                 self._execute_plan(sat_id, plan, telemetry)
                 return
 
-        # 🟢 STEP 4: Cognitive Path (LLM with Injected Context)
+        # 🟢 STEP 4: Cognitive Path (LLM Pipeline)
         self.state.is_conversation = True
         
-        # Trigger Topic Filler immediately for the thinking phase
         if topic:
              logger.info(f"⏳ Triggering Topic Filler for: {topic}")
              self.emitter.emit("play_topic_filler", sat_id, {"topic": topic})
 
-        # LLM Pipeline
+        # ✅ Enable Music Bridge safety net
         self.is_thinking = True 
         llm_start = time.perf_counter()
         
-        # Enforce "Knowledge" by wrapping the user input with retrieved context
+        # Inject context if the Semantic Router found any
         enriched_input = processed['input']
         if context:
-            logger.info(f"📚 Injecting {len(context.split('--- FILE:')) - 1} code chunks into prompt.")
-            enriched_input = (
-                f"Use the following project context to answer the user query.\n\n"
-                f"CONTEXT FROM PROJECT FILES:\n{context}\n\n"
-                f"USER QUERY: {processed['input']}"
-            )
+            if topic == "persona":
+                enriched_input = f"Use this background lore about yourself to answer naturally:\n\n{context}\n\nUSER QUERY: {processed['input']}"
+            elif topic == "syntheta":
+                enriched_input = f"Use the following project context to answer the user query.\n\nCONTEXT FROM PROJECT FILES:\n{context}\n\nUSER QUERY: {processed['input']}"
         
         self.state.update_context(sat_id, processed['input'], processed['entities'])
         packet = self.state.build_golden_packet(sat_id, enriched_input, processed.get('emotion', 'neutral'))
         
         try:
+            # 1. Generate Text
             llm_response = self.llm.generate(packet)
             telemetry["llm_lat_ms"] = round((time.perf_counter() - llm_start) * 1000, 2)
-            
-            self.is_thinking = False 
             self.state.commit_assistant_response(sat_id, llm_response)
+            
+            # 2. Generate Audio (This blocks for ~3-4 seconds while Kokoro runs)
+            # If the filler ends while this is running, bridge.wav WILL play!
             self._speak(sat_id, llm_response, telemetry=telemetry)
+            
+            # ✅ THE FIX: Turn off the flag ONLY after TTS audio generation is complete.
+            self.is_thinking = False 
             
         except Exception as e:
             logger.error(f"❌ LLM Pipeline Error: {e}")
             self.is_thinking = False
             self._speak(sat_id, "I'm having trouble connecting to my brain right now.")
-
     def handle_resume_confirmation(self, sat_id, confirmed=True):
         if not confirmed:
             self.state.reset_interruption(sat_id)
