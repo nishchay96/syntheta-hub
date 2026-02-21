@@ -73,12 +73,11 @@
       "id": "CONFIRM_YES",
       "type": "sys",
       "mode": "normal",
-      "phrases": ["yes", "yeah", "sure", "do it", "correct", "go ahead", "please"],
-      "strict_aliases": ["yes", "ok", "yep"],
+      "phrases": ["yes", "yeah", "sure", "do it", "correct", "go ahead", "please", "continue", "resume"],
+      "strict_aliases": ["yes", "ok", "yep", "continue", "resume"],
       "payload": { "action": "confirm_yes" },
       "reply_template": "Confirmed."
-    },
-    {
+    },    {
       "id": "CONFIRM_NO",
       "type": "sys",
       "mode": "normal",

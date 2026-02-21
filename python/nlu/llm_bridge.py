@@ -27,12 +27,13 @@ class OllamaBridge:
             "model": MODEL_NAME,
             "prompt": f"{system_prompt}\n\nUser: {prompt}\nAssistant:",
             "stream": False,
-            "keep_alive": -1,  # 🟢 NEW: Keeps model in VRAM forever
+            "format": "json",  # 🟢 FIX: Forces Ollama into strict JSON mode
+            "keep_alive": -1,  
             "options": {
                 "num_predict": 100,
                 "temperature": 0.7,
                 "top_p": 0.9,
-                "num_ctx": 4096 # 🟢 NEW: Fixed context size for consistent speed
+                "num_ctx": 4096 
             }
         }
         
@@ -41,7 +42,15 @@ class OllamaBridge:
             response.raise_for_status()
             
             result = response.json()
-            return result.get("response", "").strip()
+            raw_text = result.get("response", "").strip()
+            
+            # 🟢 FIX: Parse the JSON string returned by the SLM
+            try:
+                parsed_json = json.loads(raw_text)
+                return parsed_json
+            except json.JSONDecodeError:
+                logger.warning(f"⚠️ SLM returned malformed JSON. Fallback triggered.")
+                return {"response": raw_text, "active_subject": "general"}
 
         except requests.exceptions.RequestException as e:
             logger.error(f"❌ Ollama API Error: {e}")
@@ -50,7 +59,6 @@ class OllamaBridge:
             logger.error(f"Unknown API Error: {e}")
             return None
 
-    # ... (rest of your generate_slm_prompt, generate, and think methods remain identical)
     def generate_slm_prompt(self, packet: GoldenPacket) -> str:
         """
         Phase 4: The Wrapper.
@@ -72,7 +80,10 @@ class OllamaBridge:
             f"--- MEMORY ---\n"
             f"{history}\n"
             "----------------\n"
-            "INSTRUCTION: Answer briefly (under 2 sentences). Be helpful and friendly."
+            # 🟢 FIX: Strict JSON formatting instruction
+            "INSTRUCTION: You must respond STRICTLY in JSON format with two keys. "
+            "'response': your brief (under 2 sentences), helpful, and friendly conversational reply. "
+            "'active_subject': a 1-3 word contextual noun phrase representing the current topic (e.g., 'your feelings', 'the weather', 'black holes')."
         )
 
     def generate(self, packet: GoldenPacket):
@@ -88,11 +99,12 @@ class OllamaBridge:
         logger.info(f"[LLM] Processing Packet: '{user_text}' | Context: {packet.get('ctx', 'unknown')}")
         
         # 3. Call Ollama via API (Hardware-accelerated)
-        response = self._call_ollama_api(user_text, system_instruction)
+        response_dict = self._call_ollama_api(user_text, system_instruction)
         
-        if not response:
-            return "I'm having trouble connecting to my brain."
-        return response
+        if not response_dict:
+            return {"response": "I'm having trouble connecting to my brain.", "active_subject": "general"}
+            
+        return response_dict
 
     # =========================================================
     # 🔧 COMPATIBILITY LAYER (Fixes PiManager Crash)
@@ -123,7 +135,9 @@ class OllamaBridge:
             "input": user_text
         }
         
-        return self.generate(packet)
+        # 🟢 FIX: Unpack the dict to maintain backward compatibility for components expecting a string
+        result = self.generate(packet)
+        return result.get("response", "")
 
     def speak(self, raw_thought, tone="neutral"):
         """Passthrough (Already styled by think)"""

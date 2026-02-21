@@ -58,6 +58,7 @@ class EngineState:
         if sat_id not in self.cognitive:
             self.cognitive[sat_id] = {
                 "topic": "general",
+                "active_subject": "general", # 🟢 NEW: Track the specific subject from the SLM
                 "entities": {},
                 "history_buffer": [],
                 "last_interaction": 0.0,
@@ -88,6 +89,7 @@ class EngineState:
         if force_reset:
             logger.info(f"🔄 Context Pivot Triggered for Sat {sat_id}.")
             self.cognitive[sat_id]["topic"] = "general"
+            self.cognitive[sat_id]["active_subject"] = "general" # 🟢 NEW: Hard reset the subject
             self.cognitive[sat_id]["entities"] = {} 
             self.cognitive[sat_id]["history_buffer"] = [] # Hard reset
         
@@ -101,10 +103,11 @@ class EngineState:
         
         self.cognitive[sat_id]["last_interaction"] = time.time()
 
-    def commit_assistant_response(self, sat_id, text):
+    def commit_assistant_response(self, sat_id, text, active_subject="general"):
         """Called after LLM or Reflex generates a reply to save it."""
         self._init_cognitive_state(sat_id)
         self._append_history(sat_id, "assistant", text)
+        self.cognitive[sat_id]["active_subject"] = active_subject # 🟢 NEW: Save the specific subject
 
     def _append_history(self, sat_id, role, text):
         """Keeps history buffer within limits (last 6 turns)."""
@@ -163,7 +166,7 @@ class EngineState:
             self.buffers[sat_id] = bytearray()
         return self.buffers[sat_id]
 
-# ========================================================
+    # ========================================================
     # 🔧 INTERRUPTION & RESUME LOGIC (The Memory)
     # ========================================================
 
@@ -199,8 +202,12 @@ class EngineState:
             
             logger.info(f"⏸️  Audio Interrupted at {played_duration:.2f}s. Resume Pending.")
             self.playback_info.pop(sat_id, None)
+
     def calculate_rms(self, pcm_bytes):
         if not pcm_bytes: return 0.0, np.array([], dtype=np.float32)
         audio_float = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
         rms = np.sqrt(np.mean(audio_float**2))
         return rms, audio_float
+    def clear_playback(self, sat_id):
+        """Called when audio finishes naturally so WWD doesn't hallucinate an interruption."""
+        self.playback_info.pop(sat_id, None)

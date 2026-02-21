@@ -110,7 +110,8 @@ class SynthetaEngine:
         self.hallucinations = list(DEFAULT_HALLUCINATIONS)
         self.ghost_counters = {} 
 
-        self.wwd_timers = {} 
+        self.wwd_timers = {}
+        self.pending_force_listen = {} # 🟢 NEW: Tracks deterministic mic triggers 
         
         # 🟢 State flag for Music Bridge logic
         self.is_thinking = False
@@ -137,6 +138,8 @@ class SynthetaEngine:
     def on_hardware_wake(self, sat_id, payload=None):
         logger.info(f">>> ⚡ HARDWARE WAKE: Satellite {sat_id}")
 
+        self.emitter.emit("stop_audio", sat_id, {})
+
         if sat_id in self.wwd_timers:
             self.wwd_timers[sat_id].cancel()
             del self.wwd_timers[sat_id]
@@ -161,7 +164,8 @@ class SynthetaEngine:
 
     def on_calibration_update(self, sat_id, floor):
         self.gatekeeper.update_calibration(sat_id, floor)
-
+        self.state.clear_playback(sat_id)
+        
     def on_playback_finished(self, sat_id, filename):
         base_file = os.path.basename(filename)
         logger.info(f"🎵 Playback Finished [Sat {sat_id}]: {base_file}")
@@ -180,6 +184,12 @@ class SynthetaEngine:
             logger.info(f"⏳ Filler finished but LLM is thinking. Bridging with music.")
             self.emitter.emit("play_music", sat_id, {"filename": "bridge.wav"})
 
+        # 🟢 DETERMINISTIC MIC TRIGGER
+        if self.pending_force_listen.get(sat_id):
+            logger.info(f"🎤 Playback complete. Firing natural mic open (force_listen) for Sat {sat_id}")
+            if self.comms:
+                self.comms.send_command(sat_id, {"cmd": "force_listen", "timeout": 4})
+            self.pending_force_listen[sat_id] = False
     def queue_audio(self, sat_id, pcm):
         self.state.last_active_time[sat_id] = time.time()
         if self.state.session_mode.get(sat_id) == "LISTENING":
@@ -343,7 +353,27 @@ class SynthetaEngine:
                      self.emitter.emit("play_topic_filler", sat_id, {"topic": topic})
                 
                 self._execute_plan(sat_id, plan, telemetry)
+                
+                # 🟢 NEW: Post-Interruption Branching (Reflex)
+                if self.state.resume_pending.get(sat_id):
+                    state_dict = self.state.cognitive.get(sat_id, {})
+                    active_subject = state_dict.get("active_subject", "general")
+                    
+                    if active_subject and active_subject != "general":
+                        resume_prompt = f"Would you like me to finish what I was saying about {active_subject}?"
+                    else:
+                        resume_prompt = "Would you like me to finish what I was saying?"
+                    
+                    logger.info(f"⏸️ Reflex executed. Prompting user to resume: '{resume_prompt}'")
+                    # Send TTS with force_listen=True so user can say Yes/No
+                    self._speak(sat_id, resume_prompt, force_listen=True)
                 return
+
+        # 🟢 NEW: Post-Interruption Branching (Non-Reflex)
+        # The user asked a new question, shifting the topic. Clear the paused audio.
+        if self.state.resume_pending.get(sat_id):
+            logger.info(f"🔄 Topic shifted by user. Dropping paused audio for Sat {sat_id}.")
+            self.state.reset_interruption(sat_id)
 
         # 🟢 STEP 4: Cognitive Path (LLM Pipeline)
         self.state.is_conversation = True
@@ -368,22 +398,28 @@ class SynthetaEngine:
         packet = self.state.build_golden_packet(sat_id, enriched_input, processed.get('emotion', 'neutral'))
         
         try:
-            # 1. Generate Text
-            llm_response = self.llm.generate(packet)
+            llm_response_dict = self.llm.generate(packet)
+            
+            if isinstance(llm_response_dict, dict):
+                llm_response = llm_response_dict.get("response", "I lost my train of thought.")
+                active_subject = llm_response_dict.get("active_subject", "general")
+            else:
+                llm_response = str(llm_response_dict)
+                active_subject = "general"
+                
             telemetry["llm_lat_ms"] = round((time.perf_counter() - llm_start) * 1000, 2)
-            self.state.commit_assistant_response(sat_id, llm_response)
             
-            # 2. Generate Audio (This blocks for ~3-4 seconds while Kokoro runs)
-            # If the filler ends while this is running, bridge.wav WILL play!
-            self._speak(sat_id, llm_response, telemetry=telemetry)
+            self.state.commit_assistant_response(sat_id, llm_response, active_subject)
             
-            # ✅ THE FIX: Turn off the flag ONLY after TTS audio generation is complete.
+            # 🟢 THE FIX: Pass force_listen=True so the mic opens naturally when playback finishes
+            self._speak(sat_id, llm_response, force_listen=True, telemetry=telemetry)
+            
             self.is_thinking = False 
             
-        except Exception as e:
+        except Exception as e:            
             logger.error(f"❌ LLM Pipeline Error: {e}")
             self.is_thinking = False
-            self._speak(sat_id, "I'm having trouble connecting to my brain right now.")
+            self._speak(sat_id, "I'm having trouble connecting to my brain right now.")    
     def handle_resume_confirmation(self, sat_id, confirmed=True):
         if not confirmed:
             self.state.reset_interruption(sat_id)
@@ -494,13 +530,14 @@ class SynthetaEngine:
 
         self.state.track_playback(sat_id, path)
         self.state.deaf_until = time.time() + duration + 0.2
+        
+        # 🟢 FIX: Set deterministic trigger flag instead of blind timer
+        self.pending_force_listen[sat_id] = force_listen
+
         logger.info(f"🔈 Handing off playback to Go Bridge for Sat {sat_id}")
         self.emitter.emit("play_file", sat_id, {"filepath": path})
         
-        if force_listen and self.comms:
-            logger.info(f"🎤 Scheduling Remote Mic Open (force_listen) for Sat {sat_id} in {duration:.2f}s")
-            threading.Timer(duration + 0.2, lambda: self.comms.send_command(sat_id, {"cmd": "force_listen", "timeout": 4})).start()
-
+        # ❌ REMOVED the old threading.Timer for force_listen
     def _report_latency(self, tele):
             if not ENABLE_LATENCY_TELEMETRY: return
             

@@ -120,7 +120,7 @@ class PiManager:
         # ============================================
         # 🟢 LAYER 1: REFLEX BRAIN (Local Intent)
         # ============================================
-        reflex_result = self.reflex_brain.infer_intent(text, context=reflex_context, threshold=0.35)
+        reflex_result = self.reflex_brain.infer_intent(text, context=reflex_context, threshold=0.60)
         is_command_phrasing = text.lower().startswith(("turn on", "turn off", "switch", "set", "enable", "disable", "stop"))
         
         if reflex_result:
@@ -140,7 +140,7 @@ class PiManager:
                     "speak": reflex_result['reply_template'], "confidence": score, "intent": intent, "session_policy": "reflex"
                 }
             
-            elif match_type == "assumed" or (is_command_phrasing and score > 0.35):
+            elif match_type == "assumed" or (is_command_phrasing and score > 0.60):
                 self.logger.info(f"🤔 [Assumed Match] {intent} | Conf: {score:.2f}")
                 
                 self.pending_action[sat_id] = {
