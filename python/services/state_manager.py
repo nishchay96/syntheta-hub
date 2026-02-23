@@ -180,7 +180,8 @@ class EngineState:
 
     def track_playback(self, sat_id, filepath):
         """Records what is currently playing to allow for snapshots."""
-        self.playback_info[sat_id] = {"file": filepath, "start_time": time.time()}
+        # 🟢 OPTIMIZED: Removed time.time() tracking as slicing is no longer used
+        self.playback_info[sat_id] = {"file": filepath}
 
     def snapshot_playback(self, sat_id):
         """
@@ -189,18 +190,17 @@ class EngineState:
         """
         if sat_id in self.playback_info:
             info = self.playback_info[sat_id]
-            played_duration = time.time() - info["start_time"]
             
-            # Save the state for a potential resume
+            # 🟢 OPTIMIZED: Save only the file path for zero-latency full replay
             self.interrupted_state[sat_id] = {
-                "file": info["file"], 
-                "seconds_played": played_duration
+                "file": info["file"]
             }
             
             # 🟢 TRIGGER: Tell the engine to ask for confirmation next time
             self.resume_pending[sat_id] = True
             
-            logger.info(f"⏸️  Audio Interrupted at {played_duration:.2f}s. Resume Pending.")
+            filename = os.path.basename(info["file"])
+            logger.info(f"⏸️  Audio Interrupted. Resume Pending for: {filename}")
             self.playback_info.pop(sat_id, None)
 
     def calculate_rms(self, pcm_bytes):

@@ -9,9 +9,9 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from nlu.semantic_brain import SemanticBrain
 
 # ==================== ✅ UNIFIED CONFIGURATION ====================
-THRESH_STRICT = 0.85  # Synchronized with Engine high-confidence bypass
-THRESH_BARGE = 0.90
-THRESH_CONTEXT = 0.65 # Tighter threshold for intent confirmation
+THRESH_EXECUTE = 0.70 # Immediate execution threshold
+THRESH_CONFIRM = 0.40 # Ask for confirmation threshold
+THRESH_CONTEXT = 0.65 # Tighter threshold for Yes/No intent confirmation
 
 GLOBAL_CONTEXT_BATCHES = {
     "positive": ["yes", "yeah", "yep", "sure", "okay", "correct", "do it", "go ahead", "continue", "resume"],
@@ -20,7 +20,6 @@ GLOBAL_CONTEXT_BATCHES = {
 
 class PiManager:
     def __init__(self, engine_state):
-        # 🟢 FIX: 'engine_state' is the EngineState object passed from SynthetaEngine
         self.state = engine_state 
         self.logger = logging.getLogger("Brain")
         self.reflex_brain = SemanticBrain()
@@ -67,7 +66,6 @@ class PiManager:
 
         self.logger.info(f"[Pi] Sat {sat_id} Processing: '{text}' | Mode: {mode.upper()}")
         
-        # 🟢 FIX: Corrected attribute access for EngineState
         raw_history = self.state.get_recent_context(sat_id)
         reflex_context = [{"role": h["role"], "text": h["content"]} for h in raw_history]
 
@@ -75,20 +73,7 @@ class PiManager:
         # ⚡ LAYER 0: CONTEXTUAL CONFIRMATION
         # ============================================
         
-        # 1. Check for RESUME_PENDING status from the state manager
-        # 🟢 FIX: self.state.resume_pending is the correct path
-        if self.state.resume_pending.get(sat_id):
-            self.logger.info(f"⚡ [Layer 0] Intercepting Response for Resume Confirmation...")
-            pos_score, _ = self.reflex_brain.compare_against_list(text, GLOBAL_CONTEXT_BATCHES["positive"])
-            neg_score, _ = self.reflex_brain.compare_against_list(text, GLOBAL_CONTEXT_BATCHES["negative"])
-
-            if max(pos_score, neg_score) > THRESH_CONTEXT:
-                if pos_score > neg_score:
-                    return {"intent": "RESUME_CONFIRMED", "session_policy": "reflex"}
-                else:
-                    return {"intent": "RESUME_CANCELLED", "session_policy": "reflex"}
-
-        # 2. Check for internal reflex pending actions
+        # 🟢 FOREGROUND PRIORITY (Check Pending Actions First)
         if self.pending_action.get(sat_id):
             self.logger.info(f"⚡ [Layer 0] Checking confirmation for pending reflex...")
             
@@ -117,31 +102,43 @@ class PiManager:
                     self.pending_action[sat_id] = None
                     return {"speak": "Okay, I've cancelled that.", "intent": "CONFIRM_NO", "session_policy": "reflex"}
 
+        # 🟢 BACKGROUND PRIORITY (Check Resume Pending Second)
+        if self.state.resume_pending.get(sat_id):
+            self.logger.info(f"⚡ [Layer 0] Intercepting Response for Resume Confirmation...")
+            pos_score, _ = self.reflex_brain.compare_against_list(text, GLOBAL_CONTEXT_BATCHES["positive"])
+            neg_score, _ = self.reflex_brain.compare_against_list(text, GLOBAL_CONTEXT_BATCHES["negative"])
+
+            if max(pos_score, neg_score) > THRESH_CONTEXT:
+                if pos_score > neg_score:
+                    return {"intent": "RESUME_CONFIRMED", "session_policy": "reflex"}
+                else:
+                    return {"intent": "RESUME_CANCELLED", "session_policy": "reflex"}
+
         # ============================================
         # 🟢 LAYER 1: REFLEX BRAIN (Local Intent)
         # ============================================
-        reflex_result = self.reflex_brain.infer_intent(text, context=reflex_context, threshold=0.60)
-        is_command_phrasing = text.lower().startswith(("turn on", "turn off", "switch", "set", "enable", "disable", "stop"))
+        reflex_result = self.reflex_brain.infer_intent(text, context=reflex_context, threshold=0.40)
+        is_command_phrasing = text.lower().startswith(("turn on", "turn off", "switch", "set", "enable", "disable", "stop", "light", "fan"))
         
         if reflex_result:
             intent = reflex_result['intent']
             score = reflex_result['confidence']
-            match_type = reflex_result.get('match_type', 'assumed')
 
             payload = reflex_result.get('payload', {})
             ha_service = ""
             if isinstance(payload, dict):
                 ha_service = f"{payload.get('domain', '')}.{payload.get('service', '')}"
 
-            if match_type == "strict" and score >= THRESH_STRICT:
-                self.logger.info(f"🚀 [Strict Match] Executing: {intent}")
+            # 🟢 MATH-BASED ROUTING (Replaces strict/assumed labels)
+            if score >= THRESH_EXECUTE:
+                self.logger.info(f"🚀 [High Confidence] Executing: {intent} (Conf: {score:.2f})")
                 return {
                     "source": "reflex", "type": reflex_result['type'], "execute": ha_service,
                     "speak": reflex_result['reply_template'], "confidence": score, "intent": intent, "session_policy": "reflex"
                 }
             
-            elif match_type == "assumed" or (is_command_phrasing and score > 0.60):
-                self.logger.info(f"🤔 [Assumed Match] {intent} | Conf: {score:.2f}")
+            elif score >= THRESH_CONFIRM or (is_command_phrasing and score > 0.30):
+                self.logger.info(f"🤔 [Low Confidence] {intent} | Conf: {score:.2f} - Forcing Confirmation")
                 
                 self.pending_action[sat_id] = {
                     "source": "reflex", "type": reflex_result['type'], "execute": ha_service,

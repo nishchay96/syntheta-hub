@@ -98,6 +98,11 @@ if __name__ == "__main__":
     
     # 1. 🧠 Init Core Memory & Managers (The Brain Stem)
     try:
+        # 🟢 NEW: Initialize SQLite Database & Run Boot Recovery
+        from core.database_manager import DatabaseManager
+        db_manager = DatabaseManager()
+        db_manager.reset_processing_tasks()
+
         # A. Create Single Source of Truth (Memory)
         state_manager = EngineState()
         print("✅ EngineState Initialized (Single Source of Truth).")
@@ -111,6 +116,11 @@ if __name__ == "__main__":
         engine = SynthetaEngine(state_manager, pi_manager)
         engine.on_restart_request = perform_hard_restart
         print("✅ Engine Initialized.")
+
+        # 🟢 NEW: Initialize and Start the Night Watchman
+        from services.memory_worker import MemoryWorker
+        worker = MemoryWorker(state_manager)
+        worker.start()
 
     except Exception as e:
         print(f"❌ CRITICAL: Engine Init Failed: {e}")

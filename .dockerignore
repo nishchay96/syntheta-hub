@@ -1,0 +1,11 @@
+.git
+.gitignore
+venv
+venv-audio
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.db
+.sqlite
+assets/harvest.db

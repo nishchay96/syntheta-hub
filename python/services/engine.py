@@ -32,6 +32,7 @@ except ImportError:
     except ImportError:
         from audio.stt_event_emitter import STTEventEmitter
 
+from core.database_manager import DatabaseManager
 from core.knowledge_manager import KnowledgeManager
 from core.gatekeeper import AudioGatekeeper
 from nlu.llm_bridge import OllamaBridge
@@ -44,8 +45,9 @@ from .config import *
 from .config import ENABLE_LATENCY_TELEMETRY
 
 from .communications import HomeAssistantClient
-from .audio_tools import create_resume_file, pad_audio_file
+from .audio_tools import pad_audio_file
 from tts_engine import TTSEngine
+from nlu.router_bridge import LibrarianRouter # 🟢 NEW: Global Router Import
 
 logger = logging.getLogger("SynthetaEngine")
 
@@ -94,7 +96,7 @@ class SynthetaEngine:
             logger.warning(f"⚠️ TTS Disabled: {e}")
             self.tts = None
         
-                # 🟢 NEW: Initialize Knowledge Manager (RAG with BGE-M3 + Reranker)
+        # 🟢 NEW: Initialize Knowledge Manager (RAG with BGE-M3 + Reranker)
         try:
             self.knowledge = KnowledgeManager()
             logger.info("✅ OMEGA Knowledge Engine Online (BGE-M3 + Reranker)")
@@ -102,6 +104,13 @@ class SynthetaEngine:
             logger.error(f"❌ Knowledge Engine failed: {e}")
             self.knowledge = None
 
+        # 🟢 NEW: Initialize Semantic Router (Once per boot)
+        try:
+            self.librarian = LibrarianRouter(self.knowledge)
+            logger.info("✅ Librarian Router Online (Semantic 3-Way)")
+        except Exception as e:
+            logger.error(f"❌ Librarian Router failed: {e}")
+            self.librarian = None
 
         self.security_mode = "NORMAL" 
         self.sudo_timer = 0
@@ -111,9 +120,8 @@ class SynthetaEngine:
         self.ghost_counters = {} 
 
         self.wwd_timers = {}
-        self.pending_force_listen = {} # 🟢 NEW: Tracks deterministic mic triggers 
+        self.pending_force_listen = {} 
         
-        # 🟢 State flag for Music Bridge logic
         self.is_thinking = False
         
         threading.Thread(target=self._processing_loop, daemon=True).start()
@@ -155,6 +163,9 @@ class SynthetaEngine:
         self.state.deaf_until = 0.0
         self.state.skip_byte_counter = WAKE_COLLISION_SKIP_BYTES
         self.state.audio_buffers[sat_id] = b""
+        
+        self.pending_force_listen[sat_id] = False
+        
         self.state.session_start_time = time.time()
         self.state.is_conversation = False
         self.state.last_active_time[sat_id] = time.time()
@@ -164,13 +175,23 @@ class SynthetaEngine:
 
     def on_calibration_update(self, sat_id, floor):
         self.gatekeeper.update_calibration(sat_id, floor)
-        # 🟢 FIX 3: Removed clear_playback from here!
 
     def on_playback_finished(self, sat_id, filename):
         base_file = os.path.basename(filename)
         logger.info(f"🎵 Playback Finished [Sat {sat_id}]: {base_file}")
         
-        # 🟢 FIX 3: Placed clear_playback here so WWD doesn't hallucinate
+        is_interrupted = self.state.resume_pending.get(sat_id, False)
+        
+        if not is_interrupted and "temp" in filename:
+            try:
+                if os.path.exists(filename):
+                    os.remove(filename)
+                    logger.info(f"🧹 Garbage Collection: Removed finished temp file {base_file}")
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to remove temp file {base_file}: {e}")
+        elif is_interrupted and "temp" in filename:
+            logger.info(f"🛡️ Preserving interrupted file for potential resume: {base_file}")
+
         self.state.clear_playback(sat_id)
         
         if "satellite_connect" in base_file:
@@ -182,18 +203,23 @@ class SynthetaEngine:
                 self.comms.send_command(sat_id, {"cmd": "calibrate"})
             return
 
-        # 🟢 MUSIC BRIDGE: Triggers if filler ends while LLM is still 'thinking'
         if "filler_" in base_file and self.is_thinking:
             logger.info(f"⏳ Filler finished but LLM is thinking. Bridging with music.")
             self.emitter.emit("play_music", sat_id, {"filename": "bridge.wav"})
 
-        # 🟢 DETERMINISTIC MIC TRIGGER (WITH BREATH DELAY)
         if self.pending_force_listen.get(sat_id):
-            logger.info(f"🎤 Playback complete. Adding 0.5s Breath Delay for Sat {sat_id}")
+            logger.info(f"🎤 Playback complete. Synchronizing Python state and opening mic for Sat {sat_id}")
+            
+            self.state.audio_buffers[sat_id] = b""
+            self.state.deaf_until = 0.0
+            self.state.last_active_time[sat_id] = time.time()
+            self.state.session_mode[sat_id] = "LISTENING"
+            self.state.skip_byte_counter = 0 
+            
             if self.comms:
-                # 🟢 FIX 1: 0.5s delay prevents the ESP32 echo crash
                 threading.Timer(0.5, lambda: self.comms.send_command(sat_id, {"cmd": "force_listen", "timeout": 4})).start()
             self.pending_force_listen[sat_id] = False
+
     def queue_audio(self, sat_id, pcm):
         self.state.last_active_time[sat_id] = time.time()
         if self.state.session_mode.get(sat_id) == "LISTENING":
@@ -314,7 +340,6 @@ class SynthetaEngine:
         # 🟢 STEP 2: SEMANTIC ROUTING (The Traffic Cop)
         context = ""
         
-        # Route A: The Lore Book (0ms Latency for Identity)
         if topic == "persona":
             logger.info("📖 Semantic Router: Injecting Syntheta Lore Book...")
             lore_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../nlu/syntheta_lore.md'))
@@ -325,16 +350,15 @@ class SynthetaEngine:
                 logger.warning(f"⚠️ Lore Book not found: {e}")
             telemetry["rag_lat_ms"] = 0
 
-        # Route B: The Vector DB (Only for Codebase/Technical Queries)
         elif self.knowledge and topic == "syntheta":
             knowledge_start = time.perf_counter()
             logger.info("🔍 Semantic Router: Routing to RAG Database...")
             context = self.knowledge.get_context(text, top_k=5, rerank_k=2) 
             telemetry["rag_lat_ms"] = round((time.perf_counter() - knowledge_start) * 1000, 2)
             
-        # Route C: General Chat (Bypass Context entirely)
         else:
             telemetry["rag_lat_ms"] = 0
+            
         # 🟢 STEP 3: Reflex & Unified Confirmation Check
         plan = self.pi.process_query(sat_id, text)
         
@@ -355,7 +379,6 @@ class SynthetaEngine:
                      logger.info(f"⏳ Ambiguous reflex match. Triggering Topic Filler: {topic}")
                      self.emitter.emit("play_topic_filler", sat_id, {"topic": topic})
                 
-                # 🟢 FIX 2: Removed inline resume prompt. Route all actions to _execute_plan.
                 self._execute_plan(sat_id, plan, telemetry)
                 return
 
@@ -366,11 +389,9 @@ class SynthetaEngine:
              logger.info(f"⏳ Triggering Topic Filler for: {topic}")
              self.emitter.emit("play_topic_filler", sat_id, {"topic": topic})
 
-        # ✅ Enable Music Bridge safety net
         self.is_thinking = True 
         llm_start = time.perf_counter()
         
-        # Inject context if the Semantic Router found any
         enriched_input = processed['input']
         if context:
             if topic == "persona":
@@ -381,10 +402,27 @@ class SynthetaEngine:
         self.state.update_context(sat_id, processed['input'], processed['entities'])
         packet = self.state.build_golden_packet(sat_id, enriched_input, processed.get('emotion', 'neutral'))
         
+        # 🟢 PHASE 3: THE LIBRARIAN INTERCEPT & OPENCLAW INJECTION
+        if self.librarian:
+            packet = self.librarian.enrich_packet(packet)
+            
+            route = packet.get('route_taken')
+            if route in ["live_web_search", "reflex_action"]:
+                openclaw_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../assets/openclaw_cache.json'))
+                if os.path.exists(openclaw_path):
+                    try:
+                        with open(openclaw_path, 'r', encoding='utf-8') as f:
+                            live_data = f.read()
+                            if live_data.strip():
+                                packet['history'] = f"--- LIVE SYSTEM DATA ---\n{live_data}\n\n" + packet.get('history', '')
+                                logger.info("🌐 Injected OpenClaw Live Data into context.")
+                    except Exception as e:
+                        logger.warning(f"⚠️ Failed to read OpenClaw cache: {e}")
+        # -----------------------------------
+
         try:
             llm_response_dict = self.llm.generate(packet)
             
-            # 🟢 FIX 2: Extract potential HA actions from the LLM dictionary
             if isinstance(llm_response_dict, dict):
                 llm_response = llm_response_dict.get("response", "I lost my train of thought.")
                 active_subject = llm_response_dict.get("active_subject", "general")
@@ -408,22 +446,34 @@ class SynthetaEngine:
                     "speak": llm_response,
                     "force_listen": False
                 }
-                # Treats the LLM action exactly like a strict Reflex
                 self._execute_plan(sat_id, llm_plan, telemetry=telemetry)
             else:
-                # Normal Conversational Response
                 if self.state.resume_pending.get(sat_id):
                     logger.info(f"🔄 Topic shifted by user. Dropping paused audio for Sat {sat_id}.")
                     self.state.reset_interruption(sat_id)
                 
                 self._speak(sat_id, llm_response, force_listen=True, telemetry=telemetry)
+                
+                try:
+                    memory_payload = {
+                        "user_query": processed['input'],
+                        "llm_response": llm_response,
+                        "topic": topic,
+                        "entities": processed.get('entities', {}),
+                        "active_subject": active_subject
+                    }
+                    DatabaseManager().insert_memory_task(memory_payload)
+                    logger.info(f"💾 Interaction safely spooled to memory_queue.")
+                except Exception as e:
+                    logger.error(f"⚠️ Failed to spool interaction to database: {e}")
             
             self.is_thinking = False 
             
         except Exception as e:            
             logger.error(f"❌ LLM Pipeline Error: {e}")
             self.is_thinking = False
-            self._speak(sat_id, "I'm having trouble connecting to my brain right now.")   
+            self._speak(sat_id, "I'm having trouble connecting to my brain right now.")
+    
     def handle_resume_confirmation(self, sat_id, confirmed=True):
         if not confirmed:
             self.state.reset_interruption(sat_id)
@@ -433,16 +483,17 @@ class SynthetaEngine:
         interrupted = self.state.interrupted_state.get(sat_id)
         if not interrupted: return
 
-        resume_file_path = create_resume_file(
-            interrupted["file"], 
-            interrupted.get("seconds_played", 0), 
-            rewind_sec=2.0
-        )
+        original_file = interrupted.get("file")
 
-        if resume_file_path:
-            self._speak_file(sat_id, resume_file_path)
+        if original_file and os.path.exists(original_file):
+            logger.info(f"🔄 Resuming full audio from the top: {os.path.basename(original_file)}")
+            time.sleep(1.0)
+            self._speak_file(sat_id, original_file, force_listen=True)
             self.state.reset_interruption(sat_id)
-
+        else:
+            logger.warning(f"⚠️ Resume failed: Source file missing '{original_file}'")
+            self.state.reset_interruption(sat_id)    
+    
     def _handle_sudo_command(self, sat_id, text):
         clean = text.lower().strip()
         if "exit" in clean:
@@ -502,21 +553,26 @@ class SynthetaEngine:
         base_speech = plan.get("speak")
         force_listen = plan.get("force_listen", False)
         
-        # 🟢 FIX 2: Unified "Task Done" Interruption Check
+        has_action = bool(plan.get("execute"))
+        
         if self.state.resume_pending.get(sat_id):
-            state_dict = self.state.cognitive.get(sat_id, {})
-            active_subject = state_dict.get("active_subject", "general")
-            
-            if active_subject and active_subject != "general":
-                resume_prompt = f"Would you like me to finish what I was saying about {active_subject}?"
+            if has_action:
+                state_dict = self.state.cognitive.get(sat_id, {})
+                active_subject = state_dict.get("active_subject", "general")
+                
+                if active_subject and active_subject != "general":
+                    resume_prompt = f"Would you like me to finish what I was saying about {active_subject}?"
+                else:
+                    resume_prompt = "Would you like me to finish what I was saying?"
+                
+                final_speech = f"{base_speech}. {resume_prompt}" if base_speech else resume_prompt
+                logger.info(f"⏸️ Action completed. Prompting user to resume: '{final_speech}'")
+                
+                self._speak(sat_id, final_speech, force_listen=True, telemetry=telemetry)
             else:
-                resume_prompt = "Would you like me to finish what I was saying?"
-            
-            final_speech = f"{base_speech}. {resume_prompt}" if base_speech else resume_prompt
-            logger.info(f"⏸️ Action completed. Prompting user to resume: '{final_speech}'")
-            
-            # Send TTS and automatically open mic for YES/NO
-            self._speak(sat_id, final_speech, force_listen=True, telemetry=telemetry)
+                logger.info("⏸️ Clarification asked. Suppressing resume prompt until action completes.")
+                if base_speech:
+                    self._speak(sat_id, base_speech, force_listen=True, telemetry=telemetry)
         else:
             if base_speech:
                 self._speak(sat_id, base_speech, force_listen, telemetry=telemetry)
@@ -524,7 +580,6 @@ class SynthetaEngine:
                 self.comms.send_command(sat_id, {"cmd": "force_listen", "timeout": 4})
 
     def _speak(self, sat_id, text, force_listen=False, telemetry=None):
-        # 🟢 PURE SPEECH: Cache layer removed, goes direct to tts_engine
         if self.tts:
             self._speak_direct(sat_id, text, force_listen, telemetry)
 
@@ -547,27 +602,28 @@ class SynthetaEngine:
         if self.comms:
             self.comms.send_command(sat_id, {"cmd": "wwd_mode", "value": "silent"})
 
-        if sat_id in self.wwd_timers: self.wwd_timers[sat_id].cancel()
-        self.wwd_timers[sat_id] = threading.Timer(silent_zone, 
-            lambda: self.comms.send_command(sat_id, {"cmd": "wwd_mode", "value": "normal"}))
-        self.wwd_timers[sat_id].start()
+        if sat_id in self.wwd_timers: 
+            self.wwd_timers[sat_id].cancel()
+            
+        if not force_listen:
+            self.wwd_timers[sat_id] = threading.Timer(silent_zone, 
+                lambda: self.comms.send_command(sat_id, {"cmd": "wwd_mode", "value": "normal"}))
+            self.wwd_timers[sat_id].start()
 
         self.state.track_playback(sat_id, path)
         self.state.deaf_until = time.time() + duration + 0.2
         
-        # 🟢 FIX: Set deterministic trigger flag instead of blind timer
         self.pending_force_listen[sat_id] = force_listen
 
         logger.info(f"🔈 Handing off playback to Go Bridge for Sat {sat_id}")
         self.emitter.emit("play_file", sat_id, {"filepath": path})
         
-        # ❌ REMOVED the old threading.Timer for force_listen
     def _report_latency(self, tele):
             if not ENABLE_LATENCY_TELEMETRY: return
             
             stt = tele.get("stt_lat_ms", 0)
             brain = tele.get("brain_lat_ms", 0)
-            rag = tele.get("rag_lat_ms", 0) # 🟢 NEW
+            rag = tele.get("rag_lat_ms", 0) 
             llm = tele.get("llm_lat_ms", 0)
             tts = tele.get("tts_lat_ms", 0)
             
@@ -579,7 +635,7 @@ class SynthetaEngine:
             print("-" * 45)
             print(f" 🟢 STT (Whisper):   {stt:>7} ms")
             print(f" 🔵 Brain (NLU):     {brain:>7} ms")
-            print(f" 📚 RAG (BGE-M3):    {rag:>7} ms") # 🟢 NEW
+            print(f" 📚 RAG (BGE-M3):    {rag:>7} ms") 
             print(f" 🟣 LLM (Ollama):    {llm:>7} ms")
             print(f" 🟠 TTS (Kokoro):    {tts:>7} ms")
             print("="*45 + "\n")

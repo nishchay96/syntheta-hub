@@ -28,6 +28,30 @@ class KnowledgeManager:
         self.collection = self.client.get_collection(name="syntheta_docs")
         logger.info("⚡ OMEGA Knowledge Engine Optimized (MiniLM Scout + BGE Judge).")
 
+    def add_memory(self, content, metadata=None):
+        """Phase 2: Writes new vectorized memories into ChromaDB."""
+        import uuid
+        if metadata is None: metadata = {}
+        
+        doc_id = f"mem_{uuid.uuid4().hex[:8]}"
+        
+        try:
+            # Vectorize the text using the lightweight MiniLM Scout
+            vector = self.scout.encode(content, normalize_embeddings=True).tolist()
+            
+            # Push to the ChromaDB Collection
+            self.collection.add(
+                ids=[doc_id],
+                embeddings=[vector],
+                documents=[content],
+                metadatas=[metadata]
+            )
+            logger.info(f"🧠 Memory safely crystallized in ChromaDB: {doc_id}")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Failed to crystallize memory: {e}")
+            return False
+
     def get_context(self, query, top_k=15, rerank_k=3):
         """Finds context in < 2 seconds using a two-stage pipeline."""
         

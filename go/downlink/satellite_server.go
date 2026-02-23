@@ -8,7 +8,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 )
@@ -113,15 +112,8 @@ func PlayAudio(satID int, inputPath string) error {
 		finalPath = filepath.Join(projectRoot, inputPath)
 	}
 
-	defer func() {
-		// 🟢 FIX: Protect permanent assets from auto-deletion using original inputPath check
-		if !strings.Contains(inputPath, "assets/fillers") && !strings.Contains(inputPath, "assets/system") {
-			log.Printf("[DOWNLINK] Cleaning up temp file: %s", finalPath)
-			os.Remove(finalPath)
-		} else {
-			log.Printf("[DOWNLINK] Preserving permanent asset: %s", finalPath)
-		}
-	}()
+	// 🟢 DELETED: The `defer` block that was ruthlessly deleting the file has been removed.
+	// File lifecycle is now purely managed by Python.
 
 	file, err := os.Open(finalPath)
 	if err != nil {
