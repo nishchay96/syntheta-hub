@@ -128,6 +128,11 @@ class EngineState:
         for turn in state["history_buffer"]:
             history_str += f"{turn['role'].upper()}: {turn['content']}\n"
 
+        # 🟢 THE FIX: Implicit Pronoun Resolution (Coreference Override)
+        active_subject = state.get("active_subject", "general")
+        if active_subject and active_subject.lower() != "general":
+            history_str += f"\n[SYSTEM MEMORY: The user is currently talking about '{active_subject}'. Resolve pronouns (he/she/it/they) to this subject.]\n"
+
         return {
             "role": "You are Syntheta, a concise and helpful AI.",
             "ctx": state["topic"],

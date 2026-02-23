@@ -4,7 +4,8 @@ import json
 from semantic_router import Route
 from semantic_router.routers import SemanticRouter
 from semantic_router.encoders import HuggingFaceEncoder
-from duckduckgo_search import DDGS # 🟢 High-speed web interceptor
+from semantic_router.index.local import LocalIndex
+from duckduckgo_search import DDGS
 
 logger = logging.getLogger("LibrarianRouter")
 
@@ -65,16 +66,30 @@ class LibrarianRouter:
             ]
         )
         
-        # 5. Compile the Route Layer
+        # 5. Compile the routes
+        routes = [memory_route, web_search_route, reflex_route]
+
+        # 🟢 THE FIX: Forcefully populate the LocalIndex before routing
+        self.index = LocalIndex()
+        
+        # We manually encode and add the utterances for each route to guarantee the index is ready
+        logger.info("🧠 Librarian Router: Building and populating vector index...")
+        for route in routes:
+            # We must use the encoder to convert utterances to vectors
+            embeddings = self.encoder(route.utterances)
+            self.index.add(
+                embeddings=embeddings,
+                routes=[route.name] * len(route.utterances),
+                utterances=route.utterances
+            )
+        
+        # 6. Compile the Route Layer
         self.router = SemanticRouter(
             encoder=self.encoder, 
-            routes=[memory_route, web_search_route, reflex_route]
+            routes=routes,
+            index=self.index
         )
         
-        # 🟢 THE INDEX FIX: Force bake internal vectors for Turn 1 readiness
-        if hasattr(self.router, "_initialize_index"):
-            self.router._initialize_index()
-
         logger.info("🧠 Librarian Router Online | Index Baked | Web Interceptor Ready.")
 
     def _quick_web_lookup(self, query):

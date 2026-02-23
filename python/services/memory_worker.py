@@ -3,6 +3,7 @@ import json
 import logging
 import threading
 import sqlite3
+import re # 🟢 NEW: Regex Library
 
 from core.database_manager import DatabaseManager
 from core.knowledge_manager import KnowledgeManager
@@ -105,11 +106,13 @@ class MemoryWorker:
             else:
                 content = response_data
                 
-            # Clean Markdown formatting if present
-            if "```json" in content:
-                content = content.split("```json")[1].split("```")[0].strip()
+            # 🟢 UPGRADE: Indestructible Regex Extraction (Ignores all formatting)
+            match = re.search(r'\{.*\}', content, re.DOTALL)
+            if not match:
+                raise ValueError("No JSON boundaries found in LLM output.")
                 
-            memory_json = json.loads(content)
+            clean_json = match.group(0)
+            memory_json = json.loads(clean_json)
             
             summary = memory_json.get("episodic_summary", "")
             truths = memory_json.get("factual_truths", [])
@@ -125,6 +128,9 @@ class MemoryWorker:
             
         except json.JSONDecodeError:
             logger.warning("⚠️ LLM failed to output valid JSON for memory processing.")
+            return False
+        except ValueError as ve:
+            logger.warning(f"⚠️ Extraction failed: {ve}")
             return False
         except Exception as e:
             logger.error(f"❌ Memory Processing Crash: {e}")

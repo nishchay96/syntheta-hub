@@ -8,6 +8,7 @@ import re
 import json
 import wave
 import random
+from datetime import datetime # 🟢 NEW: Time tracking
 
 # ============================================
 # 🔧 SERVICE IMPORTS (ROBUST PATHING)
@@ -47,7 +48,7 @@ from .config import ENABLE_LATENCY_TELEMETRY
 from .communications import HomeAssistantClient
 from .audio_tools import pad_audio_file
 from tts_engine import TTSEngine
-from nlu.router_bridge import LibrarianRouter # 🟢 NEW: Global Router Import
+from nlu.router_bridge import LibrarianRouter 
 
 logger = logging.getLogger("SynthetaEngine")
 
@@ -89,14 +90,12 @@ class SynthetaEngine:
         self.gatekeeper = AudioGatekeeper()
         
         try: 
-            # 🟢 PURE TTS: Direct engine without caching layer
             self.tts = TTSEngine()
             logger.info("✅ TTS Engine Online (VRAM Optimized)")
         except Exception as e: 
             logger.warning(f"⚠️ TTS Disabled: {e}")
             self.tts = None
         
-        # 🟢 NEW: Initialize Knowledge Manager (RAG with BGE-M3 + Reranker)
         try:
             self.knowledge = KnowledgeManager()
             logger.info("✅ OMEGA Knowledge Engine Online (BGE-M3 + Reranker)")
@@ -104,7 +103,6 @@ class SynthetaEngine:
             logger.error(f"❌ Knowledge Engine failed: {e}")
             self.knowledge = None
 
-        # 🟢 NEW: Initialize Semantic Router (Once per boot)
         try:
             self.librarian = LibrarianRouter(self.knowledge)
             logger.info("✅ Librarian Router Online (Semantic 3-Way)")
@@ -304,26 +302,33 @@ class SynthetaEngine:
         threading.Thread(target=self._run_pipeline, args=(sat_id, audio_data)).start()
 
     def _run_pipeline(self, sat_id, audio_bytes):
-        text, confidence, turn_telemetry = self.transcriber.transcribe(audio_bytes)
-        turn_telemetry["start_time"] = time.perf_counter()
-        
-        if not text or len(text) < 2 or confidence < 0.4: return
-        if text.lower() in self.hallucinations: return
-        
-        logger.info(f">>> 📝 INPUT: '{text}' (Conf: {confidence:.2f}) [Mode: {self.security_mode}]")
-        self.state.last_active_time[sat_id] = time.time()
-        
-        if self.security_mode == "SUDO_CHALLENGE":
-            if "sudo login" in text.lower():
-                self._enter_sudo_calibration(sat_id)
-            else:
-                logger.info("🔒 Ignored input during Sudo Challenge.")
-            return
-        if self.security_mode == "SUDO_SESSION":
-            self._handle_sudo_command(sat_id, text)
-            return
+        try:
+            text, confidence, turn_telemetry = self.transcriber.transcribe(audio_bytes)
+            turn_telemetry["start_time"] = time.perf_counter()
             
-        self._handle_normal_command(sat_id, text, turn_telemetry)
+            if not text or len(text) < 2 or confidence < 0.4: return
+            if text.lower() in self.hallucinations: return
+            
+            logger.info(f">>> 📝 INPUT: '{text}' (Conf: {confidence:.2f}) [Mode: {self.security_mode}]")
+            self.state.last_active_time[sat_id] = time.time()
+            
+            if self.security_mode == "SUDO_CHALLENGE":
+                if "sudo login" in text.lower():
+                    self._enter_sudo_calibration(sat_id)
+                else:
+                    logger.info("🔒 Ignored input during Sudo Challenge.")
+                return
+            if self.security_mode == "SUDO_SESSION":
+                self._handle_sudo_command(sat_id, text)
+                return
+                
+            self._handle_normal_command(sat_id, text, turn_telemetry)
+            
+        except Exception as e:
+            logger.error(f"❌ Pipeline thread critically failed: {e}", exc_info=True)
+            self._speak(sat_id, "I hit an internal error in my processing pipeline.")
+        finally:
+            self.is_thinking = False
 
     # =========================================
     #  LOGIC HANDLERS (THE BRAIN)
@@ -363,6 +368,7 @@ class SynthetaEngine:
         plan = self.pi.process_query(sat_id, text)
         
         if plan:
+            plan["raw_input"] = text  # 🟢 FIX: Pack exact text for logging telemetry
             intent = plan.get("intent")
             
             if intent == "RESUME_CONFIRMED":
@@ -385,12 +391,26 @@ class SynthetaEngine:
         # 🟢 STEP 4: Cognitive Path (LLM Pipeline)
         self.state.is_conversation = True
         
+        # 🟢 FIX: WRITE-AHEAD LOGGING
+        wal_payload = {
+            "user_query": processed['input'],
+            "llm_response": "PENDING_GENERATION",
+            "topic": topic,
+            "entities": processed.get('entities', {}),
+            "active_subject": "general"
+        }
+        task_id = DatabaseManager().create_memory_task(wal_payload)
+        
         if topic:
              logger.info(f"⏳ Triggering Topic Filler for: {topic}")
              self.emitter.emit("play_topic_filler", sat_id, {"topic": topic})
 
         self.is_thinking = True 
         llm_start = time.perf_counter()
+        
+        # 🟢 FIX: TIME/LOCATION METADATA HEADER
+        now = datetime.now()
+        system_meta = f"[SYSTEM DATA] Current Time: {now.strftime('%A, %B %d, %Y')} at {now.strftime('%I:%M %p')}. Location: Guwahati, Assam, India."
         
         enriched_input = processed['input']
         if context:
@@ -399,10 +419,11 @@ class SynthetaEngine:
             elif topic == "syntheta":
                 enriched_input = f"Use the following project context to answer the user query.\n\nCONTEXT FROM PROJECT FILES:\n{context}\n\nUSER QUERY: {processed['input']}"
         
+        enriched_input = f"{system_meta}\n\n{enriched_input}"
+        
         self.state.update_context(sat_id, processed['input'], processed['entities'])
         packet = self.state.build_golden_packet(sat_id, enriched_input, processed.get('emotion', 'neutral'))
         
-        # 🟢 PHASE 3: THE LIBRARIAN INTERCEPT & OPENCLAW INJECTION
         if self.librarian:
             packet = self.librarian.enrich_packet(packet)
             
@@ -418,7 +439,6 @@ class SynthetaEngine:
                                 logger.info("🌐 Injected OpenClaw Live Data into context.")
                     except Exception as e:
                         logger.warning(f"⚠️ Failed to read OpenClaw cache: {e}")
-        # -----------------------------------
 
         try:
             llm_response_dict = self.llm.generate(packet)
@@ -444,7 +464,8 @@ class SynthetaEngine:
                     "intent": "LLM_ACTION",
                     "execute": ha_execute,
                     "speak": llm_response,
-                    "force_listen": False
+                    "force_listen": False,
+                    "raw_input": processed['input'] # 🟢 FIX: Pack exact text for logging
                 }
                 self._execute_plan(sat_id, llm_plan, telemetry=telemetry)
             else:
@@ -462,8 +483,9 @@ class SynthetaEngine:
                         "entities": processed.get('entities', {}),
                         "active_subject": active_subject
                     }
-                    DatabaseManager().insert_memory_task(memory_payload)
-                    logger.info(f"💾 Interaction safely spooled to memory_queue.")
+                    # 🟢 FIX: FINALIZE WAL TASK
+                    DatabaseManager().update_memory_task(task_id, memory_payload)
+                    logger.info(f"💾 Interaction {task_id} safely spooled to memory_queue.")
                 except Exception as e:
                     logger.error(f"⚠️ Failed to spool interaction to database: {e}")
             
@@ -554,6 +576,15 @@ class SynthetaEngine:
         force_listen = plan.get("force_listen", False)
         
         has_action = bool(plan.get("execute"))
+        
+        # 🟢 FIX: LOG EXECUTED REFLEX TO DATABASE
+        if has_action:
+            DatabaseManager().insert_reflex_telemetry(
+                sat_id, 
+                plan.get("intent", "UNKNOWN"), 
+                plan.get("raw_input", "N/A"), 
+                plan.get("execute", {})
+            )
         
         if self.state.resume_pending.get(sat_id):
             if has_action:
