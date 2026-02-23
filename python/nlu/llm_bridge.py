@@ -44,13 +44,18 @@ class OllamaBridge:
             result = response.json()
             raw_text = result.get("response", "").strip()
             
-            # 🟢 FIX: Parse the JSON string returned by the SLM
+    # 🟢 FIX: Parse the JSON string returned by the SLM
             try:
                 parsed_json = json.loads(raw_text)
                 return parsed_json
             except json.JSONDecodeError:
                 logger.warning(f"⚠️ SLM returned malformed JSON. Fallback triggered.")
-                return {"response": raw_text, "active_subject": "general"}
+                return {
+                    "response": raw_text, 
+                    "active_subject": "general", 
+                    "is_action": False, 
+                    "execute": None
+                }
 
         except requests.exceptions.RequestException as e:
             logger.error(f"❌ Ollama API Error: {e}")
@@ -58,7 +63,7 @@ class OllamaBridge:
         except Exception as e:
             logger.error(f"Unknown API Error: {e}")
             return None
-
+        
     def generate_slm_prompt(self, packet: GoldenPacket) -> str:
         """
         Phase 4: The Wrapper.
@@ -80,10 +85,12 @@ class OllamaBridge:
             f"--- MEMORY ---\n"
             f"{history}\n"
             "----------------\n"
-            # 🟢 FIX: Strict JSON formatting instruction
-            "INSTRUCTION: You must respond STRICTLY in JSON format with two keys. "
-            "'response': your brief (under 2 sentences), helpful, and friendly conversational reply. "
-            "'active_subject': a 1-3 word contextual noun phrase representing the current topic (e.g., 'your feelings', 'the weather', 'black holes')."
+            # 🟢 FIX: Expanded JSON formatting instruction to extract Reflex Actions
+            "INSTRUCTION: You must respond STRICTLY in JSON format with four keys:\n"
+            "- 'response': your brief (under 2 sentences), helpful, and friendly conversational reply.\n"
+            "- 'active_subject': a 1-3 word contextual noun phrase representing the current topic.\n"
+            "- 'is_action': boolean (true if the user is asking to control a physical smart home device like lights, fans, or AC, else false).\n"
+            "- 'execute': string of the Home Assistant service to call (e.g., 'light.turn_on', 'fan.turn_off', 'climate.set_temperature') if is_action is true, else null."
         )
 
     def generate(self, packet: GoldenPacket):
@@ -102,7 +109,12 @@ class OllamaBridge:
         response_dict = self._call_ollama_api(user_text, system_instruction)
         
         if not response_dict:
-            return {"response": "I'm having trouble connecting to my brain.", "active_subject": "general"}
+            return {
+                "response": "I'm having trouble connecting to my brain.", 
+                "active_subject": "general",
+                "is_action": False,
+                "execute": None
+            }
             
         return response_dict
 

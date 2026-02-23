@@ -164,11 +164,14 @@ class SynthetaEngine:
 
     def on_calibration_update(self, sat_id, floor):
         self.gatekeeper.update_calibration(sat_id, floor)
-        self.state.clear_playback(sat_id)
-        
+        # 🟢 FIX 3: Removed clear_playback from here!
+
     def on_playback_finished(self, sat_id, filename):
         base_file = os.path.basename(filename)
         logger.info(f"🎵 Playback Finished [Sat {sat_id}]: {base_file}")
+        
+        # 🟢 FIX 3: Placed clear_playback here so WWD doesn't hallucinate
+        self.state.clear_playback(sat_id)
         
         if "satellite_connect" in base_file:
             logger.info(f"📢 Calibration Warning Finished. Waiting for room silence...")
@@ -184,11 +187,12 @@ class SynthetaEngine:
             logger.info(f"⏳ Filler finished but LLM is thinking. Bridging with music.")
             self.emitter.emit("play_music", sat_id, {"filename": "bridge.wav"})
 
-        # 🟢 DETERMINISTIC MIC TRIGGER
+        # 🟢 DETERMINISTIC MIC TRIGGER (WITH BREATH DELAY)
         if self.pending_force_listen.get(sat_id):
-            logger.info(f"🎤 Playback complete. Firing natural mic open (force_listen) for Sat {sat_id}")
+            logger.info(f"🎤 Playback complete. Adding 0.5s Breath Delay for Sat {sat_id}")
             if self.comms:
-                self.comms.send_command(sat_id, {"cmd": "force_listen", "timeout": 4})
+                # 🟢 FIX 1: 0.5s delay prevents the ESP32 echo crash
+                threading.Timer(0.5, lambda: self.comms.send_command(sat_id, {"cmd": "force_listen", "timeout": 4})).start()
             self.pending_force_listen[sat_id] = False
     def queue_audio(self, sat_id, pcm):
         self.state.last_active_time[sat_id] = time.time()
@@ -331,7 +335,6 @@ class SynthetaEngine:
         # Route C: General Chat (Bypass Context entirely)
         else:
             telemetry["rag_lat_ms"] = 0
-
         # 🟢 STEP 3: Reflex & Unified Confirmation Check
         plan = self.pi.process_query(sat_id, text)
         
@@ -352,28 +355,9 @@ class SynthetaEngine:
                      logger.info(f"⏳ Ambiguous reflex match. Triggering Topic Filler: {topic}")
                      self.emitter.emit("play_topic_filler", sat_id, {"topic": topic})
                 
+                # 🟢 FIX 2: Removed inline resume prompt. Route all actions to _execute_plan.
                 self._execute_plan(sat_id, plan, telemetry)
-                
-                # 🟢 NEW: Post-Interruption Branching (Reflex)
-                if self.state.resume_pending.get(sat_id):
-                    state_dict = self.state.cognitive.get(sat_id, {})
-                    active_subject = state_dict.get("active_subject", "general")
-                    
-                    if active_subject and active_subject != "general":
-                        resume_prompt = f"Would you like me to finish what I was saying about {active_subject}?"
-                    else:
-                        resume_prompt = "Would you like me to finish what I was saying?"
-                    
-                    logger.info(f"⏸️ Reflex executed. Prompting user to resume: '{resume_prompt}'")
-                    # Send TTS with force_listen=True so user can say Yes/No
-                    self._speak(sat_id, resume_prompt, force_listen=True)
                 return
-
-        # 🟢 NEW: Post-Interruption Branching (Non-Reflex)
-        # The user asked a new question, shifting the topic. Clear the paused audio.
-        if self.state.resume_pending.get(sat_id):
-            logger.info(f"🔄 Topic shifted by user. Dropping paused audio for Sat {sat_id}.")
-            self.state.reset_interruption(sat_id)
 
         # 🟢 STEP 4: Cognitive Path (LLM Pipeline)
         self.state.is_conversation = True
@@ -400,26 +384,46 @@ class SynthetaEngine:
         try:
             llm_response_dict = self.llm.generate(packet)
             
+            # 🟢 FIX 2: Extract potential HA actions from the LLM dictionary
             if isinstance(llm_response_dict, dict):
                 llm_response = llm_response_dict.get("response", "I lost my train of thought.")
                 active_subject = llm_response_dict.get("active_subject", "general")
+                is_action = llm_response_dict.get("is_action", False)
+                ha_execute = llm_response_dict.get("execute", None)
             else:
                 llm_response = str(llm_response_dict)
                 active_subject = "general"
+                is_action = False
+                ha_execute = None
                 
             telemetry["llm_lat_ms"] = round((time.perf_counter() - llm_start) * 1000, 2)
             
             self.state.commit_assistant_response(sat_id, llm_response, active_subject)
             
-            # 🟢 THE FIX: Pass force_listen=True so the mic opens naturally when playback finishes
-            self._speak(sat_id, llm_response, force_listen=True, telemetry=telemetry)
+            if is_action or ha_execute:
+                logger.info(f"🤖 LLM generated an Action: {ha_execute}")
+                llm_plan = {
+                    "intent": "LLM_ACTION",
+                    "execute": ha_execute,
+                    "speak": llm_response,
+                    "force_listen": False
+                }
+                # Treats the LLM action exactly like a strict Reflex
+                self._execute_plan(sat_id, llm_plan, telemetry=telemetry)
+            else:
+                # Normal Conversational Response
+                if self.state.resume_pending.get(sat_id):
+                    logger.info(f"🔄 Topic shifted by user. Dropping paused audio for Sat {sat_id}.")
+                    self.state.reset_interruption(sat_id)
+                
+                self._speak(sat_id, llm_response, force_listen=True, telemetry=telemetry)
             
             self.is_thinking = False 
             
         except Exception as e:            
             logger.error(f"❌ LLM Pipeline Error: {e}")
             self.is_thinking = False
-            self._speak(sat_id, "I'm having trouble connecting to my brain right now.")    
+            self._speak(sat_id, "I'm having trouble connecting to my brain right now.")   
     def handle_resume_confirmation(self, sat_id, confirmed=True):
         if not confirmed:
             self.state.reset_interruption(sat_id)
@@ -490,14 +494,34 @@ class SynthetaEngine:
         if plan.get("intent") == "STOP":
              self._close_session(sat_id)
              return
+             
         if plan.get("execute"):
             if isinstance(plan["execute"], str) and "." in plan["execute"]:
                 self.ha.execute(plan["execute"])
+                
+        base_speech = plan.get("speak")
         force_listen = plan.get("force_listen", False)
-        if plan.get("speak"):
-            self._speak(sat_id, plan["speak"], force_listen, telemetry=telemetry)
-        elif force_listen and self.comms:
-            self.comms.send_command(sat_id, {"cmd": "force_listen", "timeout": 4})
+        
+        # 🟢 FIX 2: Unified "Task Done" Interruption Check
+        if self.state.resume_pending.get(sat_id):
+            state_dict = self.state.cognitive.get(sat_id, {})
+            active_subject = state_dict.get("active_subject", "general")
+            
+            if active_subject and active_subject != "general":
+                resume_prompt = f"Would you like me to finish what I was saying about {active_subject}?"
+            else:
+                resume_prompt = "Would you like me to finish what I was saying?"
+            
+            final_speech = f"{base_speech}. {resume_prompt}" if base_speech else resume_prompt
+            logger.info(f"⏸️ Action completed. Prompting user to resume: '{final_speech}'")
+            
+            # Send TTS and automatically open mic for YES/NO
+            self._speak(sat_id, final_speech, force_listen=True, telemetry=telemetry)
+        else:
+            if base_speech:
+                self._speak(sat_id, base_speech, force_listen, telemetry=telemetry)
+            elif force_listen and self.comms:
+                self.comms.send_command(sat_id, {"cmd": "force_listen", "timeout": 4})
 
     def _speak(self, sat_id, text, force_listen=False, telemetry=None):
         # 🟢 PURE SPEECH: Cache layer removed, goes direct to tts_engine

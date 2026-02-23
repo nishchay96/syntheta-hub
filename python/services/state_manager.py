@@ -208,6 +208,10 @@ class EngineState:
         audio_float = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
         rms = np.sqrt(np.mean(audio_float**2))
         return rms, audio_float
+    # ========================================================
+    # 🔧 INTERRUPTION & RESUME LOGIC (The Memory)
+    # ========================================================
+
     def clear_playback(self, sat_id):
         """Called when audio finishes naturally so WWD doesn't hallucinate an interruption."""
         self.playback_info.pop(sat_id, None)
