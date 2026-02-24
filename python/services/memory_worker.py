@@ -82,7 +82,8 @@ class MemoryWorker:
             # The prompt to force Ollama to extract factual truths
             prompt = f"""
             Analyze the following interaction between a human user and an AI named Syntheta.
-            Extract any permanent factual truths or preferences about the user. If there are none, output an empty list.
+            Extract any permanent factual truths, preferences, or details about the user, their family, or their life.
+            If there are none (e.g., smart home commands, casual greetings), output an empty list for factual_truths.
             
             User: {user_query}
             Syntheta: {llm_response}
@@ -92,8 +93,7 @@ class MemoryWorker:
                 "episodic_summary": "A 1-sentence summary of what happened.",
                 "factual_truths": ["Fact 1", "Fact 2"]
             }}
-            """
-            
+            """            
             # Generate via LLM (Assuming OllamaBridge returns the raw text or a dict)
             # We wrap it in a pseudo-golden packet to satisfy the bridge
             packet = {"role": "You are a data extraction AI.", "history": "", "ctx": "memory_consolidation", "input": prompt, "emotion": "neutral"}

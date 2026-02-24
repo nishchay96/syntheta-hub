@@ -81,6 +81,15 @@ class SynthetaEngine:
         self.pi = pi_manager
         self.comms = None 
         
+        # Inside SynthetaEngine.__init__
+        self.db = DatabaseManager()
+        # 🟢 Boot Recovery: Restore the last response from disk into RAM
+        last_resp = self.db.get_last_response()
+        if last_resp:
+            # Prime the history for all satellites (or specific SatID 1)
+            self.state.update_history(1, "Syntheta", last_resp)
+            logger.info("🟢 Boot Recovery: Previous conversation state restored to RAM.")
+
         self.ha = HomeAssistantClient(HA_TOKEN, HA_URL)
         self.emitter = STTEventEmitter()
         
@@ -364,7 +373,7 @@ class SynthetaEngine:
         else:
             telemetry["rag_lat_ms"] = 0
             
-        # 🟢 STEP 3: Reflex & Unified Confirmation Check
+    # 🟢 STEP 3: Reflex & Unified Confirmation Check
         plan = self.pi.process_query(sat_id, text)
         
         if plan:
@@ -385,6 +394,17 @@ class SynthetaEngine:
                      logger.info(f"⏳ Ambiguous reflex match. Triggering Topic Filler: {topic}")
                      self.emitter.emit("play_topic_filler", sat_id, {"topic": topic})
                 
+                # 🟢 NEW: Temporal Heuristic Intercept
+                if intent == "GET_TIME":
+                    # Format time as spoken string (e.g., "7:39 PM")
+                    current_time = datetime.now().strftime("%I:%M %p").lstrip('0')
+                    plan["speak"] = f"It is {current_time}."
+                    logger.info(f"⚡ Temporal Heuristic: Intercepted GET_TIME. Speaking: {plan['speak']}")
+                elif intent == "GET_DATE":
+                    # Format date as spoken string (e.g., "Tuesday, February 24, 2026")
+                    current_date = datetime.now().strftime("%A, %B %d, %Y")
+                    plan["speak"] = f"It is {current_date}."
+                    logger.info(f"⚡ Temporal Heuristic: Intercepted GET_DATE. Speaking: {plan['speak']}")
                 self._execute_plan(sat_id, plan, telemetry)
                 return
 
@@ -412,18 +432,20 @@ class SynthetaEngine:
         now = datetime.now()
         system_meta = f"[SYSTEM DATA] Current Time: {now.strftime('%A, %B %d, %Y')} at {now.strftime('%I:%M %p')}. Location: Guwahati, Assam, India."
         
-        enriched_input = processed['input']
+        self.state.update_context(sat_id, processed['input'], processed.get('entities', {}))
+        
+        # 1. Build the packet with the PRISTINE user input (Required for clean Web Search)
+        packet = self.state.build_golden_packet(sat_id, processed['input'], processed.get('emotion', 'neutral'))
+        
+        # 2. Inject RAG and Meta context safely into the HISTORY buffer
+        rag_context_str = ""
         if context:
             if topic == "persona":
-                enriched_input = f"Use this background lore about yourself to answer naturally:\n\n{context}\n\nUSER QUERY: {processed['input']}"
+                rag_context_str = f"--- LORE BOOK ---\n{context}\n-----------------\n"
             elif topic == "syntheta":
-                enriched_input = f"Use the following project context to answer the user query.\n\nCONTEXT FROM PROJECT FILES:\n{context}\n\nUSER QUERY: {processed['input']}"
-        
-        enriched_input = f"{system_meta}\n\n{enriched_input}"
-        
-        self.state.update_context(sat_id, processed['input'], processed['entities'])
-        packet = self.state.build_golden_packet(sat_id, enriched_input, processed.get('emotion', 'neutral'))
-        
+                rag_context_str = f"--- PROJECT FILES ---\n{context}\n---------------------\n"
+                
+        packet['history'] = f"{system_meta}\n\n{rag_context_str}\n{packet.get('history', '')}"        
         if self.librarian:
             packet = self.librarian.enrich_packet(packet)
             

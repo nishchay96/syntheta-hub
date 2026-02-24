@@ -52,35 +52,33 @@ class KnowledgeManager:
             logger.error(f"❌ Failed to crystallize memory: {e}")
             return False
 
-    def get_context(self, query, top_k=15, rerank_k=3):
-        """Finds context in < 2 seconds using a two-stage pipeline."""
-        
-        # 1️⃣ STAGE 1: Scout (Vector Search) - Takes ~50-100ms
-        query_vec = self.scout.encode(query, normalize_embeddings=True).tolist()
-        results = self.collection.query(
-            query_embeddings=[query_vec],
-            n_results=top_k
-        )
+    def get_context(self, query, top_k=3, rerank_k=1):
+        """
+        Retrieves context from the vault while handling inconsistent metadata.
+        """
+        try:
+            results = self.collection.query(
+                query_texts=[query],
+                n_results=top_k
+            )
 
-        if not results['documents'] or not results['documents'][0]:
-            return ""
+            if not results or not results['documents']:
+                return None
 
-        documents = results['documents'][0]
-        metadatas = results['metadatas'][0]
+            documents = results['documents'][0]
+            metadatas = results['metadatas'][0]
+            
+            context_chunks = []
+            for i in range(len(documents)):
+                # 🟢 THE FIX: Defensive metadata access
+                # Try to get 'path' or 'source', otherwise default to 'Conversation Memory'
+                source = metadatas[i].get('path') or metadatas[i].get('source') or "Conversational Memory"
+                
+                chunk = f"SOURCE: {source}\nCONTENT: {documents[i]}"
+                context_chunks.append(chunk)
 
-        # 2️⃣ STAGE 2: Judge (Reranking) - Takes ~500-800ms
-        # We only feed the top 15 results to the heavy reranker
-        pairs = [[query, doc] for doc in documents]
-        scores = self.judge.predict(pairs)
-        
-        # Sort by reranker scores (Highest first)
-        ranked_indices = np.argsort(scores)[::-1]
-        
-        # 3️⃣ STAGE 3: Context Assembly
-        context_blocks = []
-        for i in ranked_indices[:rerank_k]:
-            path = metadatas[i]['path']
-            content = documents[i]
-            context_blocks.append(f"--- FILE: {path} ---\n{content}\n")
+            return "\n\n".join(context_chunks)
 
-        return "\n".join(context_blocks)
+        except Exception as e:
+            logger.error(f"❌ Knowledge Retrieval Failed: {e}")
+            return None

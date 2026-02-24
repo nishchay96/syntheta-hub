@@ -69,6 +69,25 @@
       "payload": { "action": "stop_audio" },
       "reply_template": "Stopped."
     },
+
+    {
+      "id": "GET_TIME",
+      "type": "sys",
+      "mode": "normal",
+      "phrases": ["what time is it", "tell me the time", "what is the time now"],
+      "strict_aliases": ["what time is it", "what is the time now", "time now", "current time"],
+      "payload": { "action": "fetch_time" },
+      "reply_template": "Checking the clock."
+    },
+    {
+      "id": "GET_DATE",
+      "type": "sys",
+      "mode": "normal",
+      "phrases": ["what is the date", "what's today's date", "tell me the date", "what day is it"],
+      "strict_aliases": ["date", "what is the date", "what is the date today", "today's date"],
+      "payload": { "action": "fetch_date" },
+      "reply_template": "Checking the calendar."
+    },
     {
       "id": "CONFIRM_YES",
       "type": "sys",
