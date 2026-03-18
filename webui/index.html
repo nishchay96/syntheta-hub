@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Syntheta — Omega V3</title>
+    <meta name="description" content="Syntheta AI Engine — Voice-first interface with real-time cognitive processing.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body class="theme-dark">
+
+    <!-- Ambient Background -->
+    <div class="bg-ambient">
+        <div class="glow glow-blue"></div>
+        <div class="glow glow-purple"></div>
+        <div class="glow glow-teal"></div>
+    </div>
+
+    <!-- App Shell -->
+    <div class="app-shell">
+
+        <!-- ── TOP NAV ── -->
+        <header class="top-nav" id="top-nav">
+            <div class="nav-brand">
+                <div class="brand-icon">
+                    <i class="fa-solid fa-brain"></i>
+                </div>
+                <div class="brand-text">
+                    <span class="brand-name">SYNTHETA</span>
+                    <span class="brand-version">OMEGA V3</span>
+                </div>
+            </div>
+
+            <div class="nav-status">
+                <span class="status-dot" id="conn-dot"></span>
+                <span class="status-label" id="conn-label">Connecting...</span>
+            </div>
+
+            <div class="nav-actions">
+                <button id="btn-health" class="nav-btn" title="System Health">
+                    <i class="fa-solid fa-heart-pulse"></i>
+                </button>
+                <button id="btn-theme" class="nav-btn" title="Toggle Theme">
+                    <i class="fa-solid fa-moon"></i>
+                </button>
+            </div>
+        </header>
+
+        <!-- ── MAIN CONTENT ── -->
+        <main class="main-content">
+
+            <!-- ORB VIEW -->
+            <section class="view-section" id="view-orb">
+                <div class="orb-wrapper">
+                    <div class="orb" id="syntheta-orb">
+                        <div class="orb-fluid orb-fluid-1"></div>
+                        <div class="orb-fluid orb-fluid-2"></div>
+                        <div class="orb-fluid orb-fluid-3"></div>
+                    </div>
+                    <p class="orb-label" id="orb-label">IDLE</p>
+                    <p class="orb-sublabel" id="orb-sublabel">Awaiting connection to engine...</p>
+                </div>
+            </section>
+
+            <!-- CHAT VIEW -->
+            <section class="view-section hidden" id="view-chat">
+                <div class="chat-history" id="chat-history">
+                    <div class="chat-msg system">
+                        <div class="msg-avatar sys-avatar"><i class="fa-solid fa-brain"></i></div>
+                        <div class="msg-bubble sys-bubble">SYNTHETA online. Type a message below to begin.</div>
+                    </div>
+                </div>
+            </section>
+
+        </main>
+
+        <!-- ── BOTTOM BAR ── -->
+        <footer class="bottom-bar">
+
+            <!-- Chat input (shown in chat mode) -->
+            <div class="chat-input-row hidden" id="chat-input-area">
+                <input type="text" id="chat-input" placeholder="Ask Syntheta anything..." autocomplete="off" spellcheck="false">
+                <button id="btn-send" class="send-btn" title="Send">
+                    <i class="fa-solid fa-arrow-up"></i>
+                </button>
+            </div>
+
+            <!-- Control Pills -->
+            <div class="control-pills">
+                <button id="btn-terminal" class="pill" title="Toggle Terminal Log">
+                    <i class="fa-solid fa-terminal"></i>
+                    <span>Terminal</span>
+                </button>
+                <button id="btn-chat-toggle" class="pill pill-active" title="Toggle Chat Mode">
+                    <i class="fa-regular fa-keyboard"></i>
+                    <span>Chat</span>
+                </button>
+            </div>
+        </footer>
+
+    </div>
+
+    <!-- ── TERMINAL DRAWER ── -->
+    <div class="terminal-drawer" id="terminal-drawer">
+        <div class="terminal-header">
+            <div class="terminal-title">
+                <i class="fa-solid fa-code-branch"></i>
+                <span>Live Engine Output</span>
+            </div>
+            <button id="close-terminal" class="drawer-close">
+                <i class="fa-solid fa-chevron-down"></i>
+            </button>
+        </div>
+        <div class="terminal-body" id="terminal-logs">
+            <div class="log-line log-info">> Waiting for engine connection...</div>
+        </div>
+    </div>
+
+    <!-- ── HEALTH OVERLAY ── -->
+    <div class="modal-overlay hidden" id="overlay-health">
+        <div class="modal-card" id="health-card">
+            <div class="modal-header">
+                <h2 class="modal-title"><i class="fa-solid fa-microchip"></i> System Vitals</h2>
+                <button id="close-health" class="modal-close"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div class="vitals-grid">
+                <div class="vital-card">
+                    <div class="vital-icon vram-icon"><i class="fa-solid fa-memory"></i></div>
+                    <div class="vital-value" id="stat-vram">—</div>
+                    <div class="vital-label">VRAM</div>
+                    <div class="vital-bar"><div class="vital-bar-fill" id="bar-vram" style="width:0%"></div></div>
+                </div>
+                <div class="vital-card">
+                    <div class="vital-icon ram-icon"><i class="fa-solid fa-server"></i></div>
+                    <div class="vital-value" id="stat-ram">—</div>
+                    <div class="vital-label">RAM</div>
+                    <div class="vital-bar"><div class="vital-bar-fill" id="bar-ram" style="width:0%"></div></div>
+                </div>
+                <div class="vital-card">
+                    <div class="vital-icon net-icon"><i class="fa-solid fa-wifi"></i></div>
+                    <div class="vital-value" id="stat-net">—</div>
+                    <div class="vital-label">Network</div>
+                    <div class="vital-bar"><div class="vital-bar-fill" id="bar-net" style="width:50%"></div></div>
+                </div>
+                <div class="vital-card">
+                    <div class="vital-icon model-icon"><i class="fa-solid fa-robot"></i></div>
+                    <div class="vital-value" id="stat-model" style="font-size:1rem">Llama 3.2</div>
+                    <div class="vital-label">Core Model</div>
+                    <div class="vital-bar"><div class="vital-bar-fill" style="width:100%; background: var(--accent-green)"></div></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

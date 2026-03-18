@@ -64,6 +64,7 @@ def get_brain_env(audio_site_path):
     env["CHROMA_TELEMETRY"] = "false" 
     
     return env
+
 def check_terminal_installed():
     terms = ["gnome-terminal", "xfce4-terminal", "konsole", "x-terminal-emulator", "xterm"]
     for t in terms:
@@ -89,6 +90,20 @@ def ensure_clean_slate():
     log("Cleaning ports...", "INFO")
     for port in TARGET_PORTS:
         kill_process_on_port(port)
+        
+    # 🟢 SURGICAL DB FIX: Wiping the corrupted memory backlogs on boot
+    db_path = os.path.join(ROOT_DIR, "assets", "database", "syntheta_ledger.db")
+    if os.path.exists(db_path):
+        log("Flushing Memory Queue & OpenClaw Backlog...", "INFO")
+        try:
+            subprocess.run([
+                "sqlite3", db_path, 
+                "DELETE FROM memory_queue; DELETE FROM openclaw_jobs;"
+            ], check=True)
+            log("✅ SQLite Backlog Cleared.", "INFO")
+        except Exception as e:
+            log(f"⚠️ Failed to clear SQLite DB: {e}", "WARN")
+            
     time.sleep(0.5)
 
 def ensure_ollama_ready():
@@ -109,7 +124,7 @@ def ensure_ollama_ready():
 def main():
     os.system("clear")
     print("==========================================")
-    print("   SYNTHETA SOVEREIGN BOOTLOADER (V2.9)")
+    print("   SYNTHETA SOVEREIGN BOOTLOADER (V3.0)")
     print("   Mode: Module-Root Build Strategy")
     print("==========================================")
 
@@ -129,30 +144,12 @@ def main():
     term_cmd = check_terminal_installed()
     ensure_ollama_ready()
 
-    # 1. REFRESH KNOWLEDGE (The Librarian Crawler)
-    # 🟢 NEW: Run the crawler to update ChromaDB vectors before launching services
-    log("Refreshing OMEGA Memory (BGE-M3 Librarian)...", "BOOT")
-    crawler_path = os.path.join(PY_DIR, "tools", "code_crawler.py")
-    
-    if os.path.exists(crawler_path):
-        try:
-            subprocess.run(
-                [VENV_PYTHON, crawler_path], 
-                cwd=PY_DIR, 
-                check=True
-            )
-            log("✅ Memory Refresh Successful.", "INFO")
-        except subprocess.CalledProcessError as e:
-            log(f"⚠️ Knowledge Refresh Failed: {e}", "WARN")
-            log("Continuing with existing database...", "INFO")
-    else:
-        log("Librarian script not found. Skipping memory refresh.", "WARN")
+    # 🟢 GHOST INDEXING REMOVED: 
+    # The slow 'code_crawler.py' BGE-M3 Librarian block has been completely stripped.
 
-    # 2. COMPILE GO (Corrected for go/cmd structure)
+    # 1. COMPILE GO
     log("Compiling Go Hub from Module Root...", "BOOT")
     try:
-        # 🟢 FIX: Run from 'go/' and target './cmd'
-        # This correctly resolves paths relative to go.mod
         subprocess.run(
             ["go", "build", "-o", "syntheta-hub", "./cmd"], 
             cwd=GO_DIR, 
@@ -167,7 +164,7 @@ def main():
         try:
             ensure_clean_slate()
 
-            # 4. LAUNCH GO BRIDGE
+            # 2. LAUNCH GO BRIDGE
             log("Launching Audio Bridge (Go)...", "BOOT")
             go_bin = os.path.join(GO_DIR, "syntheta-hub")
             clean_env = get_sanitized_env()
@@ -185,7 +182,7 @@ def main():
 
             time.sleep(2) 
 
-            # 5. LAUNCH PYTHON BRAIN
+            # 3. LAUNCH PYTHON BRAIN
             log(f"Launching Sovereign Brain...", "BOOT")
             print("------------------------------------------")
             

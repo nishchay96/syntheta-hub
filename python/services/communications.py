@@ -89,7 +89,7 @@ class SatelliteNetManager:
                         if not line: break
                         try:
                             # Pass events to the common processor
-                            self._process_event(0, json.loads(line))
+                            self._process_event(1, json.loads(line))
                         except json.JSONDecodeError:
                             continue
             except (ConnectionRefusedError, socket.timeout, OSError):
@@ -228,7 +228,7 @@ class HomeAssistantClient:
 
         try:
             domain, service = service_call.split(".", 1)
-            url = f"{self.base_url}/{domain}/{service}"
+            url = f"{self.base_url}/api/services/{domain}/{service}"
             payload = {"entity_id": "all"} 
             
             logger.info(f"🏠 HA Trigger: {domain}.{service} -> {url}")

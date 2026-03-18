@@ -4,44 +4,56 @@ import numpy as np
 import time
 from faster_whisper import WhisperModel
 
-# Configuration Imports
+# 🟢 Graceful Configuration Imports
 try:
-    from .config import WHISPER_PROMPT, ASR_MODEL_TYPE, ASR_MODEL_PATH, ASR_DEVICE
+    from .config import WHISPER_PROMPT
 except ImportError:
-    # Standard fallbacks for isolated testing
     WHISPER_PROMPT = "Syntheta assistant."
-    ASR_MODEL_TYPE = "WHISPER"
-    ASR_MODEL_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../assets/models/whisper-base-en'))
-    ASR_DEVICE = "cpu"
+
+# Hardcode the strategic paths so it doesn't break if config is missing them
+ASR_MODEL_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../assets/models/whisper-base-en'))
+
+# 🟢 VRAM STRATEGY: Pin Whisper to GPU to prevent thrashing
+ASR_DEVICE = "cuda"
 
 logger = logging.getLogger("Transcriber")
 
 class AudioTranscriber:
     def __init__(self):
-        self.model_type = ASR_MODEL_TYPE.upper()
         self.device = ASR_DEVICE
         self.model = None
 
-        logger.info(f"🚀 Initializing ASR Engine: {self.model_type}")
+        logger.info("🚀 Initializing ASR Engine: WHISPER")
         self._init_whisper()
 
     def _init_whisper(self):
         """
         Loads the Whisper model using faster-whisper (CTranslate2).
-        Uses int8 quantization for high-speed CPU inference.
+        Attempts GPU pinning first, falls back to CPU if drivers are missing.
         """
         try:
-            logger.info(f"Loading Whisper from: {ASR_MODEL_PATH}")
-            # int8 quantization is perfect for your Acer Aspire's CPU
+            logger.info(f"Loading Whisper from: {ASR_MODEL_PATH} on {self.device.upper()}...")
+            
+            # 🟢 VRAM OPTIMIZATION: 'int8' on cuda uses only ~150MB of VRAM
             self.model = WhisperModel(
                 ASR_MODEL_PATH, 
                 device=self.device, 
                 compute_type="int8"
             )
-            logger.info("✅ Whisper-base Loaded Successfully (Stable Mode).")
+            logger.info("✅ Whisper-base Pinned to GPU Successfully.")
+            
         except Exception as e:
-            logger.critical(f"❌ Failed to load Whisper: {e}")
-            raise e
+            logger.error(f"⚠️ Failed to load Whisper on {self.device}: {e}")
+            logger.warning("🔄 Safety Fallback: Rerouting Whisper to CPU...")
+            
+            # SAFE FALLBACK: If CUDA/int8 fails, run on CPU so the system doesn't crash
+            self.device = "cpu"
+            self.model = WhisperModel(
+                ASR_MODEL_PATH, 
+                device=self.device, 
+                compute_type="int8"
+            )
+            logger.info("✅ Whisper-base Loaded on CPU (Fallback Mode).")
 
     def transcribe(self, audio_bytes):
         """
@@ -54,11 +66,9 @@ class AudioTranscriber:
         
         try:
             # 1. Normalize the raw 16-bit PCM bytes into float32
-            # Equation: $x_{normalized} = \frac{x_{pcm}}{32768.0}$
             audio_np = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
 
             # 2. Transcribe via Faster-Whisper
-            # segments is a generator; we iterate to get the full text
             segments, info = self.model.transcribe(
                 audio_np, 
                 beam_size=5, 

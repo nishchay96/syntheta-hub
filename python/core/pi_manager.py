@@ -4,18 +4,17 @@ from collections import deque
 import sys
 import os
 
-# Ensure we can find sibling modules
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from nlu.semantic_brain import SemanticBrain
 
 # ==================== ✅ UNIFIED CONFIGURATION ====================
-THRESH_EXECUTE = 0.70 # Immediate execution threshold
-THRESH_CONFIRM = 0.40 # Ask for confirmation threshold
-THRESH_CONTEXT = 0.65 # Tighter threshold for Yes/No intent confirmation
+THRESH_EXECUTE = 0.70 
+THRESH_CONFIRM = 0.50 
+THRESH_CONTEXT = 0.65 
 
 GLOBAL_CONTEXT_BATCHES = {
-    "positive": ["yes", "yeah", "yep", "sure", "okay", "correct", "do it", "go ahead", "continue", "resume"],
-    "negative": ["no", "nope", "cancel", "stop", "don't", "skip", "nevermind", "forget it"]
+    "positive": ["yes", "yeah", "yep", "sure", "okay", "correct", "do it", "go ahead", "continue", "resume", "please"],
+    "negative": ["no", "nope", "cancel", "stop", "don't", "skip", "nevermind", "forget it", "abort"]
 }
 
 class PiManager:
@@ -57,7 +56,7 @@ class PiManager:
             self.is_engaged[sat_id] = True
             self.logger.info(f"[Pi] Session (Sat {sat_id}): Conversation Continued.")
 
-    def process_query(self, sat_id, text, mode="clean", interrupted_context=None):
+    def process_query(self, sat_id, text, mode="clean", interrupted_context=None, slm_reflex_override=None):
         self._init_sat_state(sat_id)
         self.last_interaction_time[sat_id] = time.time()
         
@@ -70,21 +69,13 @@ class PiManager:
         reflex_context = [{"role": h["role"], "text": h["content"]} for h in raw_history]
 
         # ============================================
-        # ⚡ LAYER 0: CONTEXTUAL CONFIRMATION
+        # ⚡ LAYER 0: CONTEXTUAL CONFIRMATION (THE INTERCEPTOR)
         # ============================================
         
-        # 🟢 FOREGROUND PRIORITY (Check Pending Actions First)
         if self.pending_action.get(sat_id):
-            self.logger.info(f"⚡ [Layer 0] Checking confirmation for pending reflex...")
-            
-            keyword = self.pending_action[sat_id]['intent'].replace("_", " ").lower()
-            current_batches = {
-                "positive": [keyword, "yes", "do it", "proceed", "go ahead"],
-                "negative": ["no", "cancel", "stop", "nevermind"]
-            }
-
-            pos_score, _ = self.reflex_brain.compare_against_list(text, current_batches["positive"])
-            neg_score, _ = self.reflex_brain.compare_against_list(text, current_batches["negative"])
+            self.logger.info(f"⚡ [Layer 0] Intercepting Response for Pending Reflex...")
+            pos_score, _ = self.reflex_brain.compare_against_list(text, GLOBAL_CONTEXT_BATCHES["positive"])
+            neg_score, _ = self.reflex_brain.compare_against_list(text, GLOBAL_CONTEXT_BATCHES["negative"])
 
             if max(pos_score, neg_score) > THRESH_CONTEXT:
                 if pos_score > neg_score:
@@ -96,13 +87,13 @@ class PiManager:
                         "execute": cached_action.get("execute"),
                         "speak": cached_action.get("speak", "Done."),
                         "intent": cached_action.get("intent"),
-                        "session_policy": "reflex"
+                        "session_policy": "reflex",
+                        "force_listen": True # 🟢 BLANKET RULE: Keep mic open after confirmed action
                     }
                 else:
                     self.pending_action[sat_id] = None
                     return {"speak": "Okay, I've cancelled that.", "intent": "CONFIRM_NO", "session_policy": "reflex"}
 
-        # 🟢 BACKGROUND PRIORITY (Check Resume Pending Second)
         if self.state.resume_pending.get(sat_id):
             self.logger.info(f"⚡ [Layer 0] Intercepting Response for Resume Confirmation...")
             pos_score, _ = self.reflex_brain.compare_against_list(text, GLOBAL_CONTEXT_BATCHES["positive"])
@@ -115,33 +106,35 @@ class PiManager:
                     return {"intent": "RESUME_CANCELLED", "session_policy": "reflex"}
 
         # ============================================
-        # 🟢 LAYER 1: REFLEX BRAIN (Local Intent)
+        # 🟢 LAYER 1: FAST PATH & SLM OVERRIDE
         # ============================================
-        reflex_result = self.reflex_brain.infer_intent(text, context=reflex_context, threshold=0.40)
-        is_command_phrasing = text.lower().startswith(("turn on", "turn off", "switch", "set", "enable", "disable", "stop", "light", "fan"))
         
+        reflex_result = None
+        
+        if slm_reflex_override:
+            self.logger.info(f"🔄 [SLM Override] Bypassing vector search for ID: {slm_reflex_override}")
+            reflex_result = self.reflex_brain.get_intent_by_id(slm_reflex_override)
+        else:
+            reflex_result = self.reflex_brain.infer_intent(text, context=reflex_context, threshold=THRESH_CONFIRM)
+
         if reflex_result:
             intent = reflex_result['intent']
             score = reflex_result['confidence']
-
+            
             payload = reflex_result.get('payload', {})
-            ha_service = ""
-            if isinstance(payload, dict):
-                ha_service = f"{payload.get('domain', '')}.{payload.get('service', '')}"
 
-            # 🟢 MATH-BASED ROUTING (Replaces strict/assumed labels)
             if score >= THRESH_EXECUTE:
-                self.logger.info(f"🚀 [High Confidence] Executing: {intent} (Conf: {score:.2f})")
+                self.logger.info(f"🚀 [High Confidence/SLM] Executing: {intent} (Conf: {score:.2f})")
                 return {
-                    "source": "reflex", "type": reflex_result['type'], "execute": ha_service,
-                    "speak": reflex_result['reply_template'], "confidence": score, "intent": intent, "session_policy": "reflex"
+                    "source": "reflex", "type": reflex_result['type'], "execute": payload,
+                    "speak": reflex_result['reply_template'], "confidence": score, "intent": intent, "session_policy": "reflex",
+                    "force_listen": True # 🟢 BLANKET RULE: Keep mic open after fast-path action
                 }
             
-            elif score >= THRESH_CONFIRM or (is_command_phrasing and score > 0.30):
+            elif score >= THRESH_CONFIRM:
                 self.logger.info(f"🤔 [Low Confidence] {intent} | Conf: {score:.2f} - Forcing Confirmation")
-                
                 self.pending_action[sat_id] = {
-                    "source": "reflex", "type": reflex_result['type'], "execute": ha_service,
+                    "source": "reflex", "type": reflex_result['type'], "execute": payload,
                     "speak": reflex_result['reply_template'], "confidence": score, "intent": intent, "session_policy": "reflex"
                 }
                 
@@ -152,9 +145,6 @@ class PiManager:
                     "confidence": score, "intent": "RECOGNITION_QUESTION", "session_policy": "conversation",
                     "force_listen": True 
                 }
-
-        if is_command_phrasing:
-             return {"source": "reflex", "speak": "I couldn't identify the device you want to control.", "session_policy": "reflex"}
         
         self.logger.info("[Pi] No reflex match. Handing off to Cognitive Engine.")
         self.is_engaged[sat_id] = True 

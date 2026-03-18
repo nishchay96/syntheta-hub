@@ -15,9 +15,11 @@ from core.pi_manager import PiManager
 # 🟢 FIX: Import from the correct 'services' folder
 from services.state_manager import EngineState
 
-# Import your custom engine
 from services.engine import SynthetaEngine, TARGET_CHUNK_SIZE
 from services.communications import SatelliteNetManager
+
+# Import new Web UI Server Bridge
+# (Local import used below in __main__)
 
 # Configure Logger
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(name)s] %(levelname)s: %(message)s')
@@ -112,15 +114,14 @@ if __name__ == "__main__":
         print("✅ PiManager Initialized (Dependency Injection Complete).")
 
         # C. Init Engine (Injected with both)
-        # ⚠️ NOTE: Ensure SynthetaEngine.__init__ accepts (state_manager, pi_manager)
         engine = SynthetaEngine(state_manager, pi_manager)
         engine.on_restart_request = perform_hard_restart
         print("✅ Engine Initialized.")
 
-        # 🟢 NEW: Initialize and Start the Night Watchman
-        from services.memory_worker import MemoryWorker
-        worker = MemoryWorker(state_manager)
-        worker.start()
+        # 🟢 NEW: Initialize and Start the Night Watchman (Optional)
+        # from services.memory_worker import MemoryWorker
+        # worker = MemoryWorker(state_manager)
+        # worker.start()
 
     except Exception as e:
         print(f"❌ CRITICAL: Engine Init Failed: {e}")
@@ -133,11 +134,17 @@ if __name__ == "__main__":
         
         # 🟢 CRITICAL FIX: Inject Comms back into Engine
         # This closes the loop so Engine can send commands to Satellites
-        engine.comms = comms 
+        engine.register_comms(comms)
         
         print("✅ Network Manager Initialized (TCP 5556 / UDP 5555).")
         
         DiscoveryService(port=6002).start()
+        
+        # 🟢 NEW: Start Local Web Interface Server
+        from services.web_api import get_web_server
+        uvicorn_server, ws_manager = get_web_server(engine=engine, port=8000)
+        engine.register_web_manager(ws_manager)
+        
         threading.Thread(target=cli_input_loop, args=(comms,), daemon=True).start()
     except Exception as e:
         print(f"❌ CRITICAL: Network Manager Failed: {e}")
@@ -155,58 +162,63 @@ if __name__ == "__main__":
         sys.exit(1)
 
     # 4. Audio Ingestion Loop
-    print("✅ System Ready. Listening...")
+    print("✅ System Ready. Listening on UDP 6000 and HTTP 8000...")
     
-    # Pre-allocate buffer for Satellite 1 to avoid repeated dict lookups
-    sat_id = 1
-    engine_queue = engine.queue_audio # Optimization: cache function reference
-    
-    # Raw buffer for accumulating chunks
-    buffer = bytearray()
-    
-    stat_start_time = time.time()
-    stat_rx_packets = 0
-    stat_bytes_total = 0
+    def audio_ingest_loop():
+        # Cache the queue function for speed
+        engine_queue = engine.queue_audio
+        
+        stat_start_time = time.time()
+        stat_rx_packets = 0
+        stat_bytes_total = 0
 
-    try:
-        while True:
-            # A. RECEIVE
-            try:
-                data, addr = sock.recvfrom(4096) # Standard MTU is 1500, safe upper bound
-            except OSError as e:
-                logger.warning(f"UDP Recv Error: {e}")
-                continue
-            
-            # B. MONITOR (Every 5s)
-            stat_rx_packets += 1
-            stat_bytes_total += len(data)
-            
-            now = time.time()
-            if now - stat_start_time >= 5.0:
-                elapsed = now - stat_start_time
-                rx_pps = stat_rx_packets / elapsed
-                kbps = (stat_bytes_total * 8) / 1000 / elapsed
-                # Only print if there is actual traffic to reduce log spam
-                if rx_pps > 1.0:
-                    print(f" [📊 MONITOR] Ingest: {rx_pps:.1f} pps ({kbps:.1f} kbps)")
-                stat_start_time = now
-                stat_rx_packets = 0
-                stat_bytes_total = 0
-
-            # C. PROCESS
-            if len(data) > 0:
-                buffer.extend(data)
+        try:
+            while True:
+                # A. RECEIVE
+                try:
+                    # MTU size + headroom
+                    data, addr = sock.recvfrom(4096) 
+                except OSError as e:
+                    logger.warning(f"UDP Recv Error: {e}")
+                    continue
                 
-                # Chunk and feed to Engine
-                # We process while buffer is >= TARGET_CHUNK_SIZE
-                while len(buffer) >= TARGET_CHUNK_SIZE:
-                    chunk = buffer[:TARGET_CHUNK_SIZE]
-                    engine_queue(sat_id, bytes(chunk))
-                    
-                    # Efficiently slice the buffer 
-                    del buffer[:TARGET_CHUNK_SIZE]
+                # B. MONITOR (Every 5s)
+                stat_rx_packets += 1
+                stat_bytes_total += len(data)
+                
+                now = time.time()
+                if now - stat_start_time >= 5.0:
+                    elapsed = now - stat_start_time
+                    rx_pps = stat_rx_packets / elapsed
+                    kbps = (stat_bytes_total * 8) / 1000 / elapsed
+                    if rx_pps > 1.0:
+                        print(f" [📊 MONITOR] Ingest: {rx_pps:.1f} pps ({kbps:.1f} kbps)")
+                    stat_start_time = now
+                    stat_rx_packets = 0
+                    stat_bytes_total = 0
 
+                # C. PROCESS
+                if len(data) > 0:
+                    # 🟢 CRITICAL FIX: Bypass buffering loop to fix 0-Byte Bug
+                    # We hardcode to ID 1 to ensure it hits the active session.
+                    # If your firmware sends a header byte, change this to: sat_id = data[0]; payload = data[1:]
+                    
+                    sat_id = 1 
+                    engine_queue(sat_id, data)
+
+        except KeyboardInterrupt:
+            print("\n--- SHUTTING DOWN AUDIO INGEST ---")
+            os._exit(0)
+        finally:
+            sock.close()
+
+    # Start the custom audio loop in a background daemon thread
+    threading.Thread(target=audio_ingest_loop, daemon=True).start()
+
+    # Pass the main thread to Uvicorn for dead-lock free FastAPI execution
+    import asyncio
+    try:
+        asyncio.run(uvicorn_server.serve())
     except KeyboardInterrupt:
-        print("\n--- SHUTTING DOWN ---")
-    finally:
-        sock.close()
+        print("\n--- SHUTTING DOWN SYSTEM ---")
+        os._exit(0)

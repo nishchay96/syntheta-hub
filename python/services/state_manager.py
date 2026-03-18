@@ -1,222 +1,308 @@
 import time
 import queue
 import logging
+import re
+import json
+import requests
 import numpy as np
 import wave
 import contextlib
 import sys
 import os
-from typing import Dict, List, Any
+from typing import Dict
 
-# 🔧 PHASE 3: IMPORT DATA MODELS
 sys.path.append(os.path.join(os.path.dirname(__file__), '../../'))
 from core.data_models import GoldenPacket, CognitiveState
 
 logger = logging.getLogger("StateManager")
 
+SUMMARIZER_MODEL = "llama3.2:1b"    # Lightweight — background only
+OLLAMA_CHAT_URL  = "http://localhost:11434/api/chat"
+MAX_HISTORY_PAIRS = 8               # Pairs before 1B summarizer fires
+
+
 class EngineState:
     def __init__(self):
-        # --- AUDIO DATA ---
-        self.audio_queue = queue.Queue(maxsize=500)
+        # ── Audio ─────────────────────────────────────────────
+        self.audio_queue   = queue.Queue(maxsize=500)
         self.audio_buffers = {}     # {sat_id: bytearray}
-        self.buffers = {}           # {sat_id: bytearray}
-        self.calib_buffer = {}      # {sat_id: [rms, ...]}
-        self.thresholds = {}        # {sat_id: float}
-        
-        # --- TIMERS ---
-        self.last_active_time = {}  # {sat_id: time}
-        self.silence_start = {}     # {sat_id: time}
-        self.follow_up_start = {}   # {sat_id: time}
-        
-        # --- SESSION & CONVERSATION LOGIC ---
-        self.session_start_time = 0.0  
-        self.is_conversation = False   
+        self.buffers       = {}     # {sat_id: bytearray}
+        self.calib_buffer  = {}     # {sat_id: [rms, ...]}
+        self.thresholds    = {}     # {sat_id: float}
 
-        self.deaf_until = 0.0 # Timestamp: Ignore audio until this time
+        # ── Timers ─────────────────────────────────────────────
+        self.last_active_time = {}  # {sat_id: time} — resets on every audio packet
+        # 🟢 last_interaction_time — resets ONLY on actual user speech
+        # NightWatchman reads this for idle detection
+        self.last_interaction_time = 0.0
 
-        # --- MODES ---
-        self.state = {}        
-        self.session_mode = {}      
-        self.wake_volume = {}
-        
-        # --- INTERRUPTION & RESUME STATE ---
-        self.session_origins = {}   
-        self.playback_info = {}     
-        self.interrupted_state = {} 
-        self.resume_pending = {}    
-        
-        self.is_muted = False
+        self.silence_start  = {}
+        self.follow_up_start = {}
 
-        # ========================================================
-        # 🧠 PHASE 3: COGNITIVE STATE (Multi-Room Briefcases)
-        # ========================================================
-        # 🟢 FIX 1: Make Cognitive State Per-Satellite
+        # ── Session ────────────────────────────────────────────
+        self.session_start_time = 0.0
+        self.is_conversation    = False
+        self.deaf_until         = 0.0
+        self.skip_byte_counter  = 0     # Bytes to skip after wake collision
+
+        # ── Modes ──────────────────────────────────────────────
+        self.state        = {}
+        self.session_mode = {}
+        self.wake_volume  = {}
+
+        # ── Interruption & Resume ──────────────────────────────
+        self.session_origins  = {}
+        self.playback_info    = {}
+        self.interrupted_state = {}
+        self.resume_pending   = {}
+        self.is_muted         = False
+
+        # ── Cognitive State (per satellite) ───────────────────
         self.cognitive: Dict[int, CognitiveState] = {}
 
-    def _init_cognitive_state(self, sat_id):
-        """Helper to ensure a satellite has a brain state initialized."""
+    # ----------------------------------------------------------
+    # COGNITIVE STATE INIT
+    # ----------------------------------------------------------
+    def _init_cognitive_state(self, sat_id: int):
         if sat_id not in self.cognitive:
             self.cognitive[sat_id] = {
-                "topic": "general",
-                "active_subject": "general", # 🟢 NEW: Track the specific subject from the SLM
-                "entities": {},
-                "history_buffer": [],
+                "topic":          "general",
+                "entities":       {},
+                "history_buffer": [],   # [{role, content}, ...]
+                "summary":        "",   # Compressed summary of older turns
                 "last_interaction": 0.0,
-                "is_active": False
+                "active_subject": "general",
+                "is_active":      False,
             }
 
-    # ========================================================
-    # 🧠 COGNITIVE METHODS (The Judge)
-    # ========================================================
-
-    def get_recent_context(self, sat_id, limit=5) -> List[Dict[str, Any]]:
-        """
-        🟢 NEW: Read-Only Access for PiManager.
-        Returns the last 'limit' turns from the cognitive history buffer.
-        """
+    # ----------------------------------------------------------
+    # CONTEXT UPDATE — called by engine after transcription
+    # ----------------------------------------------------------
+    def update_context(self, sat_id: int, user_text: str,
+                       new_entities: dict, force_reset: bool = False):
         self._init_cognitive_state(sat_id)
-        buffer = self.cognitive[sat_id]["history_buffer"]
-        return buffer[-limit:]
 
-    def update_context(self, sat_id, user_text, new_entities, force_reset=False):
-        """
-        The Judge: Updates History and Entities for a specific Satellite.
-        """
-        self._init_cognitive_state(sat_id)
-        
-        # 1. External Topic Pivot (Triggered by PiManager or SemanticBrain)
-        # 🟢 FIX 3: Removed brittle substring matching.
         if force_reset:
-            logger.info(f"🔄 Context Pivot Triggered for Sat {sat_id}.")
-            self.cognitive[sat_id]["topic"] = "general"
-            self.cognitive[sat_id]["active_subject"] = "general" # 🟢 NEW: Hard reset the subject
-            self.cognitive[sat_id]["entities"] = {} 
-            self.cognitive[sat_id]["history_buffer"] = [] # Hard reset
-        
-        # 2. Update Briefcase
+            logger.info(f"🔄 Context Pivot for Sat {sat_id}.")
+            self.cognitive[sat_id]["topic"]          = "general"
+            self.cognitive[sat_id]["entities"]       = {}
+            self.cognitive[sat_id]["history_buffer"] = []
+            self.cognitive[sat_id]["summary"]        = ""
+
         if new_entities:
             self.cognitive[sat_id]["entities"].update(new_entities)
-            
-        # 3. Update History 
-        # 🟢 FIX 2: We append but explicitly track the role
+
         self._append_history(sat_id, "user", user_text)
-        
         self.cognitive[sat_id]["last_interaction"] = time.time()
 
-    def commit_assistant_response(self, sat_id, text, active_subject="general"):
-        """Called after LLM or Reflex generates a reply to save it."""
+        # 🟢 Update global interaction clock — NightWatchman idle check reads this
+        self.last_interaction_time = time.time()
+
+    def get_recent_context(self, sat_id: int):
+        self._init_cognitive_state(sat_id)
+        return self.cognitive[sat_id]["history_buffer"]
+
+    def commit_assistant_response(self, sat_id: int, text: str,
+                                  active_subject: str = "general"):
+        """
+        Saves assistant response to history.
+        Triggers 1B summarizer if history exceeds MAX_HISTORY_PAIRS.
+        active_subject stored for resume prompt generation.
+        """
         self._init_cognitive_state(sat_id)
         self._append_history(sat_id, "assistant", text)
-        self.cognitive[sat_id]["active_subject"] = active_subject # 🟢 NEW: Save the specific subject
+        self.cognitive[sat_id]["active_subject"] = active_subject
 
-    def _append_history(self, sat_id, role, text):
-        """Keeps history buffer within limits (last 6 turns)."""
+        # Trigger summarizer if history is getting long
+        pairs = len(self.cognitive[sat_id]["history_buffer"]) // 2
+        if pairs >= MAX_HISTORY_PAIRS:
+            import threading
+            threading.Thread(
+                target=self._summarize_history,
+                args=(sat_id,),
+                daemon=True
+            ).start()
+
+    def _append_history(self, sat_id: int, role: str, text: str):
+        """Appends turn to history buffer. Hard cap at MAX_HISTORY_PAIRS * 2 entries."""
         buffer = self.cognitive[sat_id]["history_buffer"]
         buffer.append({"role": role, "content": text})
-        
-        if len(buffer) > 6:
-            self.cognitive[sat_id]["history_buffer"] = buffer[-6:]
+        hard_cap = MAX_HISTORY_PAIRS * 2
+        if len(buffer) > hard_cap:
+            self.cognitive[sat_id]["history_buffer"] = buffer[-hard_cap:]
 
-    def build_golden_packet(self, sat_id, user_text, emotion) -> GoldenPacket:
+    # ----------------------------------------------------------
+    # 1B HISTORY SUMMARIZER — fires in background thread
+    # ----------------------------------------------------------
+    def _summarize_history(self, sat_id: int):
         """
-        Factory Method: Assembles the Golden Packet for the LLM Bridge.
+        Compresses the oldest half of history into a summary string.
+        Uses llama3.2:1b — lightweight, never blocks main LLM.
+        Runs in a daemon thread so it never blocks engine.
+        """
+        self._init_cognitive_state(sat_id)
+        buffer = self.cognitive[sat_id]["history_buffer"]
+
+        if len(buffer) < MAX_HISTORY_PAIRS * 2:
+            return  # Nothing to compress yet
+
+        # Take the oldest half to summarise, keep the newest half live
+        half       = len(buffer) // 2
+        old_turns  = buffer[:half]
+        keep_turns = buffer[half:]
+
+        history_text = "\n".join(
+            f"{t['role'].upper()}: {t['content']}" for t in old_turns
+        )
+        existing_summary = self.cognitive[sat_id].get("summary", "")
+
+        prompt = (
+            f"Summarise this conversation in 2-3 sentences. "
+            f"Keep all personal facts, names, topics discussed. "
+            f"Third person style.\n\n"
+            f"{'PRIOR SUMMARY: ' + existing_summary + chr(10) if existing_summary else ''}"
+            f"CONVERSATION:\n{history_text}\n\nSUMMARY:"
+        )
+
+        try:
+            payload = {
+                "model":      SUMMARIZER_MODEL,
+                "messages":   [{"role": "user", "content": prompt}],
+                "stream":     False,
+                "keep_alive": -1,
+                "options":    {"temperature": 0.0, "num_predict": 150}
+            }
+            res     = requests.post(OLLAMA_CHAT_URL, json=payload, timeout=20.0)
+            summary = res.json().get("message", {}).get("content", "").strip()
+            summary = re.sub(r'<think>.*?</think>', '', summary, flags=re.DOTALL).strip()
+
+            if summary:
+                self.cognitive[sat_id]["summary"]        = summary
+                self.cognitive[sat_id]["history_buffer"] = keep_turns
+                logger.info(f"📝 History summarised for Sat {sat_id}.")
+
+        except Exception as e:
+            logger.error(f"⚠️ Summarizer failed for Sat {sat_id}: {e}")
+
+    # ----------------------------------------------------------
+    # GOLDEN PACKET FACTORY
+    # ----------------------------------------------------------
+    def build_golden_packet(self, sat_id: int, user_text: str,
+                             emotion: str,
+                             memory_context: str = "") -> GoldenPacket:
+        """
+        Assembles the complete GoldenPacket for LLMBridge.
+
+        memory_context — injected by engine from get_context_fast()
+                         (JSON bucket node facts, current session)
+        memory_tank    — filled by router/engine from SQL nomic retrieval
+                         or web_data (set after enrich_packet)
         """
         self._init_cognitive_state(sat_id)
         state = self.cognitive[sat_id]
-        
-        history_str = ""
-        for turn in state["history_buffer"]:
-            history_str += f"{turn['role'].upper()}: {turn['content']}\n"
 
-        # 🟢 THE FIX: Implicit Pronoun Resolution (Coreference Override)
-        active_subject = state.get("active_subject", "general")
-        if active_subject and active_subject.lower() != "general":
-            history_str += f"\n[SYSTEM MEMORY: The user is currently talking about '{active_subject}'. Resolve pronouns (he/she/it/they) to this subject.]\n"
+        # Build history string — include summary of older turns if present
+        history_parts = []
+        summary = state.get("summary", "")
+        if summary:
+            history_parts.append(f"[Earlier context]: {summary}")
+
+        for turn in state["history_buffer"]:
+            history_parts.append(
+                f"{turn['role'].upper()}: {turn['content']}")
+
+        history_str = "\n".join(history_parts)
+
+        # Update interaction clock
+        self.last_interaction_time = time.time()
 
         return {
-            "role": "You are Syntheta, a concise and helpful AI.",
-            "ctx": state["topic"],
-            "history": history_str,
-            "entities": state.get("entities", {}), # Safe get
-            "emotion": emotion,
-            "input": user_text
+            # Core identity
+            "role":          "You are Syntheta, a concise and helpful AI.",
+            "ctx":           state["topic"],
+            "emotion":       emotion,
+            "entities":      state.get("entities", {}),
+
+            # Input
+            "input":         user_text,
+
+            # History (engine will override with sliding window)
+            "history":       history_str,
+
+            # Memory layers — populated by engine + router
+            "memory_context": memory_context,  # JSON bucket facts (current session)
+            "memory_tank":    "",              # Set by engine after enrich_packet
+
+            # Routing — set by LibrarianRouter.enrich_packet()
+            "route_taken":        "general_no_web",
+            "needs_memory":       False,
+            "matched_memory_node": None,
+            "web_data":           None,
+
+            # Model selection — default, router can override
+            "model":       "llama3.2:3b",
+
+            # Abort check — set by engine for barge-in detection
+            "abort_check": None,
         }
 
-    # ========================================================
-    # 🔧 ALIGNMENT METHODS & UTILITIES (Unchanged Logic)
-    # ========================================================
+    # ----------------------------------------------------------
+    # PLAYBACK TRACKING
+    # ----------------------------------------------------------
+    def track_playback(self, sat_id: int, filepath: str):
+        self.playback_info[sat_id] = {
+            "file": filepath, "start_time": time.time()}
 
-    def register_wake_event(self, sat_id):
-        self.deaf_until = 0.0 
+    def clear_playback(self, sat_id: int):
+        self.playback_info.pop(sat_id, None)
+        self.resume_pending.pop(sat_id, None)
+
+    def snapshot_playback(self, sat_id: int):
+        if sat_id in self.playback_info:
+            info     = self.playback_info[sat_id]
+            duration = time.time() - info["start_time"]
+            self.interrupted_state[sat_id] = {
+                "file": info["file"], "duration": duration}
+            logger.info(f"⏸️  Audio paused at {duration:.2f}s for Sat {sat_id}")
+            self.playback_info.pop(sat_id, None)
+            self.resume_pending[sat_id] = True
+
+    def reset_interruption(self, sat_id: int):
+        self.interrupted_state.pop(sat_id, None)
+        self.resume_pending.pop(sat_id, None)
+        self.playback_info.pop(sat_id, None)
+
+    # ----------------------------------------------------------
+    # UTILITIES
+    # ----------------------------------------------------------
+    def register_wake_event(self, sat_id: int):
+        self.deaf_until              = 0.0
         self.last_active_time[sat_id] = time.time()
-        self.session_mode[sat_id] = "LISTENING"
+        self.last_interaction_time   = time.time()
+        self.session_mode[sat_id]    = "LISTENING"
         self.reset_interruption(sat_id)
-        logger.info(f"⏰ Session Clock Reset for Sat {sat_id} (Deafness Cleared)")
+        logger.info(f"⏰ Session Reset for Sat {sat_id}")
 
-    def update_noise_floor(self, sat_id, floor_val):
+    def update_noise_floor(self, sat_id: int, floor_val: float):
         self.thresholds[sat_id] = floor_val
-        logger.info(f"🧠 State Updated: Sat {sat_id} Noise Floor = {floor_val}")
+        logger.info(f"🧠 Noise Floor updated: Sat {sat_id} = {floor_val}")
 
-    def get_wav_duration(self, filepath):
+    def get_wav_duration(self, filepath: str) -> float:
         try:
             with contextlib.closing(wave.open(filepath, 'r')) as f:
-                frames = f.getnframes()
-                rate = f.getframerate()
-                return frames / float(rate)
+                return f.getnframes() / float(f.getframerate())
         except Exception:
             return 0.0
 
-    def get_buffer(self, sat_id):
+    def get_buffer(self, sat_id: int) -> bytearray:
         if sat_id not in self.buffers:
             self.buffers[sat_id] = bytearray()
         return self.buffers[sat_id]
 
-    # ========================================================
-    # 🔧 INTERRUPTION & RESUME LOGIC (The Memory)
-    # ========================================================
-
-    def reset_interruption(self, sat_id):
-        """Clears all interruption tracking for a clean slate."""
-        if sat_id in self.interrupted_state or sat_id in self.resume_pending:
-            logger.info(f"🧹 Clearing Stale Interruption State for Sat {sat_id}")
-            self.interrupted_state.pop(sat_id, None)
-            self.resume_pending.pop(sat_id, None)
-            self.playback_info.pop(sat_id, None)
-
-    def track_playback(self, sat_id, filepath):
-        """Records what is currently playing to allow for snapshots."""
-        # 🟢 OPTIMIZED: Removed time.time() tracking as slicing is no longer used
-        self.playback_info[sat_id] = {"file": filepath}
-
-    def snapshot_playback(self, sat_id):
-        """
-        Captures the exact moment audio was cut off.
-        Sets resume_pending to True to trigger the Engine's confirmation logic.
-        """
-        if sat_id in self.playback_info:
-            info = self.playback_info[sat_id]
-            
-            # 🟢 OPTIMIZED: Save only the file path for zero-latency full replay
-            self.interrupted_state[sat_id] = {
-                "file": info["file"]
-            }
-            
-            # 🟢 TRIGGER: Tell the engine to ask for confirmation next time
-            self.resume_pending[sat_id] = True
-            
-            filename = os.path.basename(info["file"])
-            logger.info(f"⏸️  Audio Interrupted. Resume Pending for: {filename}")
-            self.playback_info.pop(sat_id, None)
-
-    def calculate_rms(self, pcm_bytes):
-        if not pcm_bytes: return 0.0, np.array([], dtype=np.float32)
-        audio_float = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
-        rms = np.sqrt(np.mean(audio_float**2))
+    def calculate_rms(self, pcm_bytes: bytes):
+        if not pcm_bytes:
+            return 0.0, np.array([], dtype=np.float32)
+        audio_float = (np.frombuffer(pcm_bytes, dtype=np.int16)
+                       .astype(np.float32) / 32768.0)
+        rms = np.sqrt(np.mean(audio_float ** 2))
         return rms, audio_float
-    # ========================================================
-    # 🔧 INTERRUPTION & RESUME LOGIC (The Memory)
-    # ========================================================
-
-    def clear_playback(self, sat_id):
-        """Called when audio finishes naturally so WWD doesn't hallucinate an interruption."""
-        self.playback_info.pop(sat_id, None)

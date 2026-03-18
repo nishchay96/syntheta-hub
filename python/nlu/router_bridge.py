@@ -2,179 +2,743 @@ import logging
 import os
 import json
 import requests
-import re
-import concurrent.futures
-from ddgs import DDGS
-from datetime import datetime
+import urllib.request
+import numpy as np
+import time
+import threading
+import glob
+from typing import Optional
 
 logger = logging.getLogger("LibrarianRouter")
 
-# 🟢 CONFIGURATION
-ROUTER_MODEL = "syntheta-brain:latest"
-TASK_MODEL = "syntheta-brain:latest" # Maintained for potential future use, but bypassed for web search
-OLLAMA_API_URL = "http://localhost:11434/api/generate"
+# ============================================================
+# CONFIGURATION
+# ============================================================
+ROUTER_MODEL    = "llama3.2:3b"   # Routing decisions — already hot in RAM
+SEARXNG_URL     = "http://localhost:8080/search"
+OLLAMA_CHAT_URL = "http://localhost:11434/api/chat"
+OLLAMA_EMBED_URL = "http://localhost:11434/api/embeddings"
+NOMIC_MODEL     = "nomic-embed-text:v1.5"
+
+# Routing decision thresholds
+CLEAR_HIGH = 0.63   # Above → confident, no LLM needed
+CLEAR_LOW  = 0.40   # Below → confidently not that type
+# Between CLEAR_LOW and CLEAR_HIGH → gray zone → mistral decides
+
+# ============================================================
+# ANCHOR TEXTS
+# Pure semantic — no keywords
+# ============================================================
+DOMAIN_ANCHORS = {
+    "scientific":  "explain how something works science facts biology chemistry physics space research theory proof experiment",
+    "fictional":   "tell me a story creative writing roleplay movies books novels characters plot",
+    "emotional":   "i feel sad anxious lonely stressed need advice support mental health struggling",
+    "political":   "government policy election war conflict world leaders nations geopolitics official statement",
+    "technical":   "code error programming smart home device hardware terminal debug fix setup",
+    "persona":     "who are you what is your name who made you your creator identity syntheta",
+    "general":     "explain tell me what is how does definition concept meaning describe",
+}
+
+WEB_ANCHORS = {
+    "web_current_events": (
+        "what is happening right now today current news latest update "
+        "breaking news recent events this week this month"
+    ),
+    "web_live_data": (
+        "current price stock market weather temperature forecast "
+        "exchange rate live score today result petrol rate"
+    ),
+    "web_people_facts": (
+        "who won who is the current who leads who announced "
+        "official statement record holder world ranking result"
+    ),
+    "web_health_opinion": (
+        "is it good for health what do experts say research shows "
+        "studies suggest what people think reviews opinions benefits"
+    ),
+    "web_product_market": (
+        "best option available right now what is new released "
+        "compare models which one to buy market alternatives specs reviews"
+    ),
+    "web_recommendation_live": (
+        "suggest me recommend a better replacement upgrade alternative "
+        "what should i get instead whats better than what to choose"
+    ),
+}
+
+# ============================================================
+# ROUTING PROMPT — used only for gray zone queries
+# ============================================================
+ROUTING_PROMPT = """You are a query router for a personal AI voice assistant.
+Classify this query into exactly ONE category.
+
+CATEGORIES:
+- web      : requires live internet data (news, weather, prices, current events, product market comparisons, health research, public opinions)
+- memory   : requires the user's personal stored facts (their devices, car, family, job, health conditions, personal preferences)
+- both     : requires BOTH live web data AND the user's personal facts (e.g. "find a replacement for my phone" needs what phone they own AND current market options)
+- general  : general knowledge the AI already knows from training (science explanations, history, how things work, jokes, concepts)
+
+DECISION RULES:
+- "my X" where X is possession/person/preference → memory or both
+- "upgrade", "replacement", "better than my X", "should i buy" → both
+- Current events, prices, weather, news, election results → web
+- Health research ("is X good for health"), public opinion ("what do people think") → web
+- How does X work, explain X, tell me about X with no personal angle → general
+
+Reply with ONLY the single word: web / memory / both / general
+No explanation. No punctuation.
+
+Query: "{query}"
+Category:"""
+
 
 class LibrarianRouter:
-    def __init__(self, knowledge_manager):
-        self.knowledge = knowledge_manager
-        logger.info(f"🧠 Librarian Router Online | LLM Traffic Cop Active ({ROUTER_MODEL}) | Web Interceptor Ready.")
+    def __init__(self, vault_path: str = None):
+        # Vault path for dynamic personal anchor loading
+        # In production this is set from MemoryWorker.vault_path
+        self.vault_path = vault_path
 
-    def _llm_route_query(self, query):
+        # Pre-cached vectors
+        self._domain_vecs   = {}
+        self._web_vecs      = {}
+        self._personal_vecs = {}  # Dynamic — rebuilt when vault changes
+        self._personal_lock = threading.Lock()
+
+        # Last vault scan time — used to detect new bucket files
+        self._last_vault_scan = 0.0
+        self._vault_scan_interval = 30.0  # Re-scan every 30s for new nodes
+
+        logger.info("🧠 Pre-computing Nomic v1.5 anchors...")
+        self._precompute_static_anchors()
+        logger.info("🌐 Librarian Router Online | mistral:7b routing | Parallel Nomic/LLM active")
+
+    # ----------------------------------------------------------
+    # STARTUP
+    # ----------------------------------------------------------
+    def _precompute_static_anchors(self):
+        """Embeds domain and web anchors at startup. Fast — runs once."""
+        t = time.perf_counter()
+        for cat, text in DOMAIN_ANCHORS.items():
+            vec = self._embed(text, "search_document")
+            if vec is not None:
+                self._domain_vecs[cat] = vec
+
+        for cat, text in WEB_ANCHORS.items():
+            vec = self._embed(text, "search_document")
+            if vec is not None:
+                self._web_vecs[cat] = vec
+
+        elapsed = (time.perf_counter() - t) * 1000
+        logger.info(f"✅ {len(self._domain_vecs)} domain + {len(self._web_vecs)} web anchors "
+                    f"precomputed in {elapsed:.0f}ms")
+
+    def _load_personal_anchors(self):
         """
-        Uses the Algorithmic Reasoning Engine to strictly categorize the user's intent.
+        Builds personal node anchors from live bucket JSON files.
+        Called at routing time if vault has been updated since last scan.
+        Non-blocking — uses cached vectors between scans.
         """
-        prompt = f"""
-        You are the Omega Hub Routing Core. You must classify the user's input into EXACTLY ONE of five routes. 
-        Process the user's request through this strict logical decision tree, in this exact order.
+        if not self.vault_path or not os.path.exists(self.vault_path):
+            return
 
-        STEP 1: Check for Physical Actions (reflex_action)
-        Does the user want to change their physical environment right now? (e.g., turn on/off, dim, set a timer, stop playing music). 
-        -> IF YES, route to "reflex_action". DO NOT proceed to Step 2.
+        now = time.time()
+        if now - self._last_vault_scan < self._vault_scan_interval:
+            return  # Use cached anchors
 
-        STEP 2: Check for System/Database Metrics (sql_metrics)
-        Is the user asking about the AI's internal software, database status, token usage, logs, or system errors?
-        -> IF YES, route to "sql_metrics". DO NOT proceed to Step 3.
+        self._last_vault_scan = now
+        new_vecs = {}
 
-        STEP 3: Check for Personal Memory (fetch_memory)
-        Is the user asking you to recall a past preference, previous conversation, OR asking about the state of the current chat?
-        -> Look for: "me", "my", "I", "we", "last thing", "repeat", "previous", "earlier", "again", "what did you say".
-        -> IF YES, route to "fetch_memory". DO NOT proceed to Step 4.
+        for json_file in glob.glob(os.path.join(self.vault_path, "**", "Bucket_*.json"),
+                                   recursive=True):
+            try:
+                with open(json_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                bucket = data.get("bucket", "Unknown")
+                for node_name, attrs in data.get("nodes", {}).items():
+                    # Build rich text from node name + all attributes
+                    if isinstance(attrs, dict):
+                        attr_text = " ".join(f"{k} {v}" for k, v in attrs.items())
+                    else:
+                        attr_text = str(attrs)
+                    anchor_text = f"{bucket} {node_name} {attr_text}"
+                    anchor_key  = f"{bucket}::{node_name}"
 
-        STEP 4: Check for Live/Real-Time Data (live_web_search)
-        Does the user need information that changes constantly or periodically? (e.g., current news, live sports, today's weather, CURRENT WORLD LEADERS, CURRENT CEOS, current events).
-        -> IF YES, route to "live_web_search". DO NOT proceed to Step 5.
-        -> RULE: Questions like "Who is the President" or "Who is the CEO" change over time. They MUST go to the web.
+                    vec = self._embed(anchor_text, "search_document")
+                    if vec is not None:
+                        new_vecs[anchor_key] = vec
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to load personal anchor from {json_file}: {e}")
 
-        STEP 5: Check for Static Facts / Chat (general_knowledge)
-        If the query did not trigger Steps 1-4, it belongs here. This includes science, math, history, definitions, and casual greetings.
-        -> IF the answer to the question is the EXACT SAME today as it was 50 years ago, it goes here. Do NOT put questions about current politicians here.
+        with self._personal_lock:
+            self._personal_vecs = new_vecs
 
-        User Query: {query}
+        if new_vecs:
+            logger.info(f"🧠 Personal anchors updated: {len(new_vecs)} nodes loaded")
 
-        Respond STRICTLY in JSON format with a single key "route".
-        Example: {{"route": "live_web_search"}}
+    def register_node(self, bucket: str, node_name: str, attrs: dict):
         """
-        
+        Called by RealtimeMemoryCapture._save_fact() when a new node is written.
+        Updates the personal anchor map immediately without waiting for the scan interval.
+        """
+        if isinstance(attrs, dict):
+            attr_text = " ".join(f"{k} {v}" for k, v in attrs.items())
+        else:
+            attr_text = str(attrs)
+        anchor_text = f"{bucket} {node_name} {attr_text}"
+        anchor_key  = f"{bucket}::{node_name}"
+
+        vec = self._embed(anchor_text, "search_document")
+        if vec is not None:
+            with self._personal_lock:
+                self._personal_vecs[anchor_key] = vec
+            logger.debug(f"🧠 Personal anchor registered: {anchor_key}")
+
+    # ----------------------------------------------------------
+    # EMBEDDING
+    # ----------------------------------------------------------
+    def _embed(self, text: str, prefix: str = "search_query") -> Optional[np.ndarray]:
+        try:
+            payload = {
+                "model": NOMIC_MODEL,
+                "prompt": f"{prefix}: {text}",
+                "keep_alive": -1
+            }
+            req = urllib.request.Request(
+                OLLAMA_EMBED_URL,
+                data=json.dumps(payload).encode('utf-8'),
+                headers={'Content-Type': 'application/json'}
+            )
+            with urllib.request.urlopen(req, timeout=5.0) as res:
+                return np.array(json.loads(res.read().decode('utf-8'))['embedding'])
+        except Exception as e:
+            logger.error(f"⚠️ Nomic embed failed: {e}")
+            return None
+
+    @staticmethod
+    def _best_score(q_vec: np.ndarray, anchor_vecs: dict) -> tuple:
+        if not anchor_vecs:
+            return 0.0, None
+        scores = {}
+        for k, v in anchor_vecs.items():
+            denom = np.linalg.norm(q_vec) * np.linalg.norm(v)
+            scores[k] = float(np.dot(q_vec, v) / denom) if denom > 0 else 0.0
+        best_k = max(scores, key=scores.get)
+        return scores[best_k], best_k
+
+    # ----------------------------------------------------------
+    # TOPIC CLASSIFICATION (for filler selection)
+    # Nomic only — must stay fast, called on every query
+    # ----------------------------------------------------------
+    def get_topic_with_score(self, text: str) -> tuple:
+        """
+        Returns (topic, confidence) for filler audio selection.
+        Pure Nomic — no LLM call. Always fast.
+        Called by engine.py to decide play_filler and bridge behaviour.
+        """
+        if not self._domain_vecs:
+            return "general", 0.0
+        try:
+            q_vec = self._embed(text, "search_query")
+            if q_vec is None:
+                return "general", 0.0
+            score, topic = self._best_score(q_vec, self._domain_vecs)
+            return topic or "general", float(score)
+        except Exception as e:
+            logger.error(f"⚠️ Topic scoring failed: {e}")
+            return "general", 0.0
+
+    # ----------------------------------------------------------
+    # ROUTING DECISION
+    # Two-stage: Nomic fast-path → mistral gray zone
+    # ----------------------------------------------------------
+    def _nomic_routing_decision(self, q_vec: np.ndarray) -> tuple:
+        """
+        Stage 1: Pure Nomic cosine scoring.
+        Returns (is_web, is_personal, web_score, web_key, personal_score, personal_key, is_gray)
+        is_gray=True means at least one dimension is ambiguous — needs LLM confirmation.
+        """
+        with self._personal_lock:
+            personal_vecs = dict(self._personal_vecs)
+
+        web_score,      web_key      = self._best_score(q_vec, self._web_vecs)
+        personal_score, personal_key = self._best_score(q_vec, personal_vecs)
+
+        web_clear_yes = web_score      >= CLEAR_HIGH
+        web_clear_no  = web_score      <= CLEAR_LOW
+        per_clear_yes = personal_score >= CLEAR_HIGH
+        per_clear_no  = personal_score <= CLEAR_LOW
+
+        web_gray = not web_clear_yes and not web_clear_no
+        per_gray = not per_clear_yes and not per_clear_no
+        is_gray  = web_gray or per_gray
+
+        return (
+            web_clear_yes, per_clear_yes,
+            web_score, web_key,
+            personal_score, personal_key,
+            is_gray
+        )
+
+    def _mistral_routing_decision(self, query: str) -> str:
+        """
+        Stage 2: LLM gray zone classifier.
+        Only called when Nomic is ambiguous.
+        Model is already hot in RAM — actual latency ~200-300ms.
+        Returns one of: web / memory / both / general
+        """
+        prompt = ROUTING_PROMPT.format(query=query)
         payload = {
             "model": ROUTER_MODEL,
-            "prompt": prompt,
+            "messages": [{"role": "user", "content": prompt}],
             "stream": False,
-            "format": "json",
-            "keep_alive": -1,
-            "options": {
-                "temperature": 0.0, # Pure logic, zero hallucination
-                "num_predict": 50
-            }
+            "options": {"temperature": 0.0, "num_predict": 4}
         }
-        
         try:
-            # Maintained the 15s timeout to prevent VRAM load crashes
-            response = requests.post(OLLAMA_API_URL, json=payload, timeout=15)
-            response.raise_for_status()
-            raw_text = response.json().get("response", "").strip()
-            
-            # Robust Regex extraction to bypass formatting anomalies
-            match = re.search(r'\{.*\}', raw_text, re.DOTALL)
-            if match:
-                parsed = json.loads(match.group(0))
-                route = parsed.get("route", "general_knowledge")
-                # Strict validation against the 5 new lanes
-                if route in ["fetch_memory", "live_web_search", "reflex_action", "general_knowledge", "sql_metrics"]:
-                    return route
+            res = requests.post(OLLAMA_CHAT_URL, json=payload, timeout=20.0)
+            raw = res.json().get("message", {}).get("content", "").strip().lower()
+            for cat in ["both", "memory", "web", "general"]:
+                if cat in raw:
+                    return cat
+            return "general"
         except Exception as e:
-            logger.error(f"⚠️ LLM Routing Failed, defaulting to passthrough: {e}", exc_info=True)
-            
-        return "general_knowledge" 
+            logger.error(f"⚠️ {ROUTER_MODEL} routing failed: {e}")
+            return "general"
 
-    def _quick_web_lookup(self, query):
+    def _get_route(self, query: str, q_vec: np.ndarray) -> dict:
         """
-        High-speed DuckDuckGo interceptor (Snippet-First Pipeline).
-        Bypasses the secondary LLM for zero-click latency reduction.
+        Master routing decision.
+        Returns dict with: decision, web_score, personal_score,
+        matched_node, used_llm, route_latency_ms
         """
-        def _execute_search():
-            try:
-                with DDGS() as ddgs:
-                    # Pull top 3 results to keep context window small and fast
-                    results = list(ddgs.text(query, max_results=3))
-                    if not results:
-                        logger.warning(f"🌐 No results from DDG for '{query}'")
-                        return None
-                        
-                    # Extract ONLY the text snippets directly
-                    raw_data = "\n".join([f"Source {i+1}:\nTitle: {r.get('title', 'No Title')}\nSnippet: {r.get('body', 'No snippet')}\n" for i, r in enumerate(results)])
-                    
-                    current_date = datetime.now().strftime('%B %d, %Y')
-                    logger.info(f"🌐 Sniper Web Search Complete. Extracted {len(results)} snippets.")
-                    
-                    # Return the raw snippets instantly without the Task Model penalty
-                    return f"VERIFIED WEB FACTS (As of {current_date}):\n{raw_data}"
-                    
-            except Exception as e:
-                logger.error(f"🌐 Exception in _execute_search: {e}", exc_info=True)
+        t = time.perf_counter()
+
+        (is_web, is_personal,
+         web_score, web_key,
+         personal_score, personal_key,
+         is_gray) = self._nomic_routing_decision(q_vec)
+
+        used_llm = False
+
+        if is_gray:
+            # Short queries are almost always general — skip expensive LLM routing
+            if len(query.split()) <= 6:
+                decision = "general"
+                logger.info(f"⚡ Gray zone short-circuit (≤6 words) → 'general'")
+            else:
+                # Gray zone — mistral decides
+                decision = self._mistral_routing_decision(query)
+                used_llm = True
+                logger.info(f"🤔 Gray zone → mistral: '{decision}'")
+        else:
+            if is_web and is_personal:
+                decision = "both"
+            elif is_web:
+                decision = "web"
+            elif is_personal:
+                decision = "memory"
+            else:
+                decision = "general"
+
+        return {
+            "decision":       decision,
+            "web_score":      round(web_score, 3),
+            "web_key":        web_key,
+            "personal_score": round(personal_score, 3),
+            "matched_node":   personal_key,
+            "used_llm":       used_llm,
+            "route_ms":       round((time.perf_counter() - t) * 1000, 1),
+        }
+
+    # ----------------------------------------------------------
+    # WEB TOOLS
+    # ----------------------------------------------------------
+    def _optimize_web_query(self, user_query: str,
+                             personal_context: str = "") -> str:
+        """
+        Converts conversational query to a search engine string.
+        personal_context — injected when route=both so the optimizer
+        knows the actual subject (e.g. "iPhone 12") before rewriting.
+        This prevents "upgrade it" → "best options for upgrading it"
+        and instead produces "best iPhone 12 upgrade 2026".
+        """
+        context_block = (
+            f"USER'S PERSONAL CONTEXT: {personal_context}\n\n"
+            if personal_context else ""
+        )
+        prompt = (
+            f"Today is {time.strftime('%B %d, %Y')}. "
+            f"Convert this request into a short, effective search engine query.\n"
+            f"Rules:\n"
+            f"1. Keep specific model names and entities.\n"
+            f"2. Remove filler words.\n"
+            f"3. Use {time.strftime('%Y')} as the current year.\n"
+            f"4. IMPORTANT: If the request says 'my phone', 'my laptop', etc., look at the USER'S PERSONAL CONTEXT and replace it with the actual model name.\n"
+            f"5. DO NOT add words like 'news', 'update', or 'latest' unless the user expressly asked for them.\n"
+            f"6. Max 6 words.\n"
+            f"Output ONLY the raw search string. No quotes, no explanation.\n\n"
+            f"{context_block}"
+            f"Request: '{user_query}'"
+        )
+        payload = {
+            "model":   ROUTER_MODEL,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream":  False,
+            "keep_alive": -1,
+            "options": {"temperature": 0.0, "num_predict": 15}
+        }
+        try:
+            res      = requests.post(OLLAMA_CHAT_URL, json=payload, timeout=8.0)
+            optimized = (res.json().get("message", {}).get("content", "")
+                         .replace('"', '').replace("'", '').strip())
+            # Reject if empty or suspiciously long
+            if not optimized or len(optimized.split()) > 10:
+                return user_query
+            logger.info(f"🔍 Query optimised: '{user_query}' → '{optimized}'")
+            return optimized
+        except Exception as e:
+            logger.error(f"⚠️ Query optimisation failed: {e}")
+            return user_query
+
+    def _quick_web_lookup(self, query: str) -> Optional[str]:
+        """
+        Fetches SearxNG results and synthesises them with mistral.
+        Returns formatted string or None on failure.
+        Never returns "SEARCH_FAILED_OR_EMPTY" — that string is set
+        by the caller only as a last resort after all fallbacks fail.
+        """
+        # ── SearxNG fetch ─────────────────────────────────────
+        results = self._fetch_searxng(query)
+
+        # Fallback 1: drop time_range and retry
+        if not results:
+            logger.info(f"🌐 Retrying without time filter: {query}")
+            results = self._fetch_searxng(query, time_range=None)
+
+        # Fallback 2: simplify query to first 3 words and retry
+        if not results:
+            simple_query = " ".join(query.split()[:3])
+            if simple_query != query:
+                logger.info(f"🌐 Retrying simplified: '{simple_query}'")
+                results = self._fetch_searxng(simple_query, time_range=None)
+
+        if not results:
+            logger.warning(f"🌐 All SearxNG attempts failed for: '{query}'")
+            # Fallback 3: DuckDuckGo Instant Answer API (no auth needed)
+            results = self._fetch_duckduckgo(query)
+            # DDG works best with short queries — try simplified if full fails
+            if not results:
+                simple_q = " ".join(query.split()[:3])
+                if simple_q != query:
+                    results = self._fetch_duckduckgo(simple_q)
+
+        if not results:
+            logger.warning(f"🌐 All web search backends exhausted for: '{query}'")
+            return None
+
+        # ── Synthesise with mistral ────────────────────────────
+        raw_context = "\n".join(
+            f"SOURCE: {r.get('title', 'Unknown')}\n"
+            f"SNIPPET: {r.get('content', r.get('snippet', ''))}"
+            for r in results[:8]
+        )
+
+        summary_prompt = (
+            f"You are a research assistant. Today is {time.strftime('%B %d, %Y')}.\n"
+            f"Summarise these search results into 2 very concise factual bullet points.\n"
+            f"Focus on the most important, distinct facts. No intro or outro.\n"
+            f"Each bullet: max 15 words.\n\n"
+            f"SEARCH RESULTS:\n{raw_context}"
+        )
+
+        payload = {
+            "model":   ROUTER_MODEL,
+            "messages": [{"role": "user", "content": summary_prompt}],
+            "stream":  False,
+            "keep_alive": -1,
+            "options": {"temperature": 0.1, "num_predict": 150}
+        }
+        try:
+            res     = requests.post(OLLAMA_CHAT_URL, json=payload, timeout=45.0)
+            summary = res.json().get("message", {}).get("content", "").strip()
+            if not summary:
                 return None
-
-        try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(_execute_search)
-                # Reduced timeout to 5 seconds since we aren't waiting for an LLM anymore
-                return future.result(timeout=5.0) 
-        except concurrent.futures.TimeoutError:
-            logger.error(f"🌐 Web lookup timed out after 5 seconds for query: '{query}'")
-            return None
+            logger.info(f"🌐 Web synthesis complete ({len(results)} results)")
+            return f"--- LIVE WEB ({time.strftime('%B %d, %Y')}) ---\n{summary}"
         except Exception as e:
-            logger.error(f"🌐 Web Lookup Bypassed: {e}", exc_info=True)
-            return None
+            logger.error(f"🌐 Synthesis failed: {e}")
+            # Return raw snippets as fallback so LLM gets something
+            fallback = "\n".join(
+                f"- {r.get('title','')}: {r.get('content','')[:100]}"
+                for r in results[:5]
+            )
+            return f"--- WEB SNIPPETS ---\n{fallback}" if fallback else None
 
-    def enrich_packet(self, packet):
+    def _fetch_searxng(self, query: str,
+                        time_range: Optional[str] = "day") -> list:
         """
-        The Intercept: Multi-lane routing with live data injection.
+        Raw SearxNG fetch. Returns list of result dicts or empty list.
+        Separated from synthesis so retries are clean.
+        """
+        try:
+            params = {
+                "q":      query,
+                "format": "json",
+                "engines": "google,bing,duckduckgo",
+                "language": "en-US",
+            }
+            if time_range:
+                params["time_range"] = time_range
+
+            logger.info(f"🌐 SearxNG: '{query}'" +
+                        (f" [{time_range}]" if time_range else " [all time]"))
+            res  = requests.get(SEARXNG_URL, params=params, timeout=5.0)
+            res.raise_for_status()
+            data = res.json()
+            return data.get("results", [])
+        except Exception as e:
+            logger.warning(f"🌐 SearxNG request failed: {e}")
+            return []
+
+    def _fetch_duckduckgo(self, query: str) -> list:
+        """
+        Fallback web search using DuckDuckGo Instant Answer API.
+        Free, no auth needed. Returns results in SearxNG-compatible format.
+        """
+        try:
+            params = {
+                "q": query,
+                "format": "json",
+                "no_html": 1,
+                "skip_disambig": 1,
+            }
+            logger.info(f"🦆 DuckDuckGo fallback: '{query}'")
+            res = requests.get(
+                "https://api.duckduckgo.com/",
+                params=params,
+                timeout=5.0,
+                headers={"User-Agent": "SynthetaBot/1.0"}
+            )
+            data = res.json()
+            results = []
+
+            # Abstract (main answer)
+            if data.get("AbstractText"):
+                results.append({
+                    "title": data.get("Heading", query),
+                    "content": data["AbstractText"],
+                    "url": data.get("AbstractURL", ""),
+                })
+
+            # Related Topics
+            for topic in data.get("RelatedTopics", [])[:5]:
+                if isinstance(topic, dict) and topic.get("Text"):
+                    results.append({
+                        "title": topic.get("FirstURL", "").split("/")[-1].replace("_", " "),
+                        "content": topic["Text"],
+                        "url": topic.get("FirstURL", ""),
+                    })
+
+            if results:
+                logger.info(f"🦆 DuckDuckGo returned {len(results)} results")
+            else:
+                logger.info(f"🦆 DuckDuckGo: no instant answers for '{query}'")
+
+            return results
+        except Exception as e:
+            logger.warning(f"🦆 DuckDuckGo fallback failed: {e}")
+            return []
+
+    # ----------------------------------------------------------
+    # PRONOUN / VAGUENESS RESOLUTION
+    # Runs in parallel with routing — never blocks
+    # ----------------------------------------------------------
+    def _resolve_context(self, user_input: str, history: str) -> str:
+        """
+        Resolves vague pronouns using conversation history.
+        Only fires when pronouns or very short inputs are detected.
+        Returns original input unchanged if resolution fails or hallucinates.
+        """
+        needs_resolve = (
+            any(w in user_input.lower().split()
+                for w in ["this", "that", "it", "they", "he", "she"])
+            or len(user_input.split()) < 4
+        )
+
+        if not needs_resolve or not history.strip():
+            return user_input
+
+        prompt = (
+            f"Look at the history and resolve vague references in the user input "
+            f"into a standalone sentence. If input already makes sense on its own, "
+            f"return it exactly unchanged.\n"
+            f"Output ONLY the final text. No explanation.\n\n"
+            f"History: {history[-300:]}\n"
+            f"Input: '{user_input}'\n"
+            f"Output:"
+        )
+        payload = {
+            "model": ROUTER_MODEL,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False,
+            "options": {"temperature": 0.0, "num_predict": 40}
+        }
+        try:
+            res = requests.post(OLLAMA_CHAT_URL, json=payload, timeout=8.0)
+            resolved = res.json().get("message", {}).get("content", "").strip().replace('"', '')
+
+            # Reject hallucinations:
+            # 1. Parenthetical reasoning artifacts — "(This input does not...)"
+            if '(' in resolved and ')' in resolved:
+                logger.warning(f"⚠️ Resolver rejected (parenthetical): '{resolved[:60]}'")
+                return user_input
+            # 2. Disproportionate length increase
+            input_len = len(user_input.split())
+            resolved_len = len(resolved.split())
+            if resolved_len > input_len + 5 or resolved_len > input_len * 2:
+                logger.warning(f"⚠️ Resolver rejected (too long): {resolved_len} vs {input_len} words")
+                return user_input
+            # 3. Empty or garbage
+            if not resolved or not any(c.isalpha() for c in resolved):
+                return user_input
+
+            if resolved.lower().strip() != user_input.lower().strip():
+                logger.info(f"🔄 Resolved: '{user_input}' → '{resolved}'")
+            return resolved
+        except Exception:
+            return user_input
+
+    # ----------------------------------------------------------
+    # ENRICH PACKET — master switchboard
+    # Nomic topic + parallel routing decision
+    # ----------------------------------------------------------
+    def enrich_packet(self, packet: dict) -> dict:
+        """
+        Main entry point from engine._handle_normal_command().
+        Enriches GoldenPacket with:
+          - route_taken (web / memory / both / general_no_web)
+          - web_data (if web route)
+          - topic + confidence (for filler selection)
+          - matched_node (personal node for memory injection)
         """
         user_input = packet.get('input', '')
+        history    = packet.get('history', '')
         if not user_input:
-            packet['route_taken'] = "general_knowledge"
             return packet
-            
-        # 🟢 HEURISTIC BYPASS: System Constants
-        # If the user asks for time/date, we inject it directly and skip the LLM entirely.
-        user_input_lower = user_input.lower()
-        temporal_keywords = ["time", "date", "today", "day is it", "month"]
-        if any(kw in user_input_lower for kw in temporal_keywords) and "who" not in user_input_lower:
-            current_time = datetime.now().strftime("%A, %B %d, %Y, %I:%M %p")
-            packet['history'] = f"--- SYSTEM CLOCK ---\nToday's Date and Time: {current_time}\n"
-            packet['route_taken'] = "system_bypass"
-            logger.info("⚡ Librarian: Temporal Heuristic Triggered. Bypassing LLM Router.")
+
+        t_total = time.perf_counter()
+
+        # Refresh personal anchors from vault if needed
+        self._load_personal_anchors()
+
+        # ── Stage 1: Single Nomic embedding (shared by all downstream scoring) ──
+        t_embed = time.perf_counter()
+        q_vec = self._embed(user_input, "search_query")
+        embed_ms = (time.perf_counter() - t_embed) * 1000
+
+        if q_vec is None:
+            packet['route_taken'] = "general_no_web"
             return packet
-        
-        # 1. LLM Evaluates the Text Instantly
-        route_choice = self._llm_route_query(user_input)
-        packet['route_taken'] = route_choice
-        
-        # LANE 1: THE VAULT (ChromaDB)
-        if route_choice == "fetch_memory":
-            logger.info("🔎 Librarian: Memory Intent Detected. Searching Vault...")
-            
-            # Persona Collision Override
-            packet['override_topic'] = "fetch_memory" 
-            
-            context = self.knowledge.get_context(user_input, top_k=3, rerank_k=1)
-            if context:
-                existing_history = packet.get('history', '')
-                packet['history'] = f"--- RETRIEVED PAST MEMORY ---\n{context}\n\n{existing_history}"
-                logger.info("✅ Librarian: Memory context injected.")
-        
-        # LANE 2: THE INTERCEPTOR (Live Web)
-        elif route_choice == "live_web_search":
-            logger.info(f"🌐 Librarian: Web Intent Detected. Searching for '{user_input}'...")
-            live_web_data = self._quick_web_lookup(user_input)
-            if live_web_data:
-                existing_history = packet.get('history', '')
-                packet['history'] = f"--- LIVE WEB SNIPPETS ---\n{live_web_data}\n\n{existing_history}"
-                logger.info(f"✅ Librarian: Live web context injected.")
+
+        # ── Stage 2: Parallel execution ──────────────────────────────────────
+        # A. Topic classification (Nomic only, instant) — for filler selection
+        # B. Routing decision (Nomic fast-path, mistral gray zone)
+        # C. Context resolution (mistral, only if pronouns detected)
+        # All three use the same q_vec from Stage 1
+
+        topic_result   = {}
+        routing_result = {}
+        resolved_input = user_input
+
+        def _run_topic():
+            score, best = self._best_score(q_vec, self._domain_vecs)
+            topic_result['topic'] = best or "general"
+            topic_result['score'] = score
+
+        def _run_routing():
+            routing_result.update(self._get_route(user_input, q_vec))
+
+        def _run_resolve():
+            nonlocal resolved_input
+            resolved_input = self._resolve_context(user_input, history)
+
+        threads = [
+            threading.Thread(target=_run_topic,   daemon=True),
+            threading.Thread(target=_run_routing, daemon=True),
+            threading.Thread(target=_run_resolve, daemon=True),
+        ]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join(timeout=12.0)  # Hard cap — never block engine indefinitely
+
+        # ── Apply topic result ────────────────────────────────────────────────
+        topic      = topic_result.get('topic', 'general')
+        confidence = topic_result.get('score', 0.0)
+
+        logger.info(f"🛰️  Topic: {topic} | Confidence: {confidence:.4f}")
+
+        # ── Apply resolved input ──────────────────────────────────────────────
+        if resolved_input != user_input:
+            packet['input'] = resolved_input
+
+        # ── Apply routing result ──────────────────────────────────────────────
+        decision     = routing_result.get('decision', 'general')
+        matched_node = routing_result.get('matched_node')
+        used_llm     = routing_result.get('used_llm', False)
+        route_ms     = routing_result.get('route_ms', 0)
+
+        logger.info(
+            f"🗺️  Route: {decision} | "
+            f"web={routing_result.get('web_score',0):.2f} "
+            f"mem={routing_result.get('personal_score',0):.2f} "
+            f"{'[LLM]' if used_llm else '[Nomic]'} | {route_ms:.0f}ms"
+        )
+
+        # Store matched node for ContextAssembler to fetch the actual data
+        if matched_node:
+            packet['matched_memory_node'] = matched_node
+
+        # ── Execute route ─────────────────────────────────────────────────────
+        if decision == "general":
+            packet['route_taken'] = "general_no_web"
+
+        elif decision == "memory":
+            packet['route_taken'] = "general_no_web"
+            packet['needs_memory'] = True
+
+        elif decision in ("web", "both"):
+            if decision == "both":
+                packet['needs_memory'] = True
+
+            # 🟢 Pass full memory context to optimizer so it can resolve things like "my phone"
+            # packet['memory_context'] contains the JSON buckets (e.g., PhoneModel: iPhone 12)
+            mem_ctx_str = packet.get("memory_context", "")
+            optimized = self._optimize_web_query(resolved_input, mem_ctx_str)
+            web_data  = self._quick_web_lookup(optimized)
+
+            if web_data:
+                packet['route_taken'] = "general_web_search"
+                packet['web_data']    = web_data
             else:
-                logger.warning(f"🌐 No live web data returned for '{user_input}' – LLM will answer from base knowledge.")
-            
-        # LANE 3, 4, 5: PASSTHROUGH
-        else:
-            logger.debug(f"⚡ Librarian: Route '{route_choice}'. Passing through.")
-        
+                # 🟢 Web failed — don't poison memory_tank with failure string
+                # Fall back to general route so LLM answers from training knowledge
+                # Log it clearly so we know SearxNG is down
+                logger.warning(
+                    f"🌐 Web search failed for '{optimized}' — "
+                    f"falling back to general route"
+                )
+                packet['route_taken'] = "general_no_web"
+                packet['web_data']    = None
+                # Inject a note so LLM knows web was attempted but failed
+                packet['memory_tank'] = (
+                    f"[Note: Live web search was attempted but unavailable. "
+                    f"Answer from training knowledge and note it may not be current.]"
+                )
+
+        total_ms = (time.perf_counter() - t_total) * 1000
+        logger.info(
+            f"⚡ enrich_packet done | "
+            f"embed={embed_ms:.0f}ms total={total_ms:.0f}ms"
+        )
+
         return packet

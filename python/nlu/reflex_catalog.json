@@ -8,7 +8,7 @@
       "type": "ha",
       "mode": "normal",
       "phrases": ["turn on the light", "lights on", "switch on the light", "it's too dark in here"],
-      "strict_aliases": ["light on", "lights on"],
+      "strict_aliases": ["light on", "lights on", "turn on the light", "turn on the lights", "switch on the light"],
       "payload": { "domain": "light", "service": "turn_on", "entity": "context_aware" },
       "reply_template": "Lights on."
     },
@@ -17,7 +17,7 @@
       "type": "ha",
       "mode": "normal",
       "phrases": ["turn off the light", "lights off", "switch off the light", "it's bright enough"],
-      "strict_aliases": ["light off", "lights off"],
+      "strict_aliases": ["light off", "lights off", "turn off the light", "turn off the lights", "switch off the light"],
       "payload": { "domain": "light", "service": "turn_off", "entity": "context_aware" },
       "reply_template": "Lights off."
     },
@@ -26,7 +26,7 @@
       "type": "ha",
       "mode": "normal",
       "phrases": ["turn on the fan", "start the fan", "it's hot", "get some air moving"],
-      "strict_aliases": ["fan on"],
+      "strict_aliases": ["fan on", "turn on the fan", "start the fan"],
       "payload": { "domain": "fan", "service": "turn_on", "entity": "context_aware" },
       "reply_template": "Fan started."
     },
@@ -35,7 +35,7 @@
       "type": "ha",
       "mode": "normal",
       "phrases": ["turn off the fan", "stop the fan", "it's getting cold"],
-      "strict_aliases": ["fan off"],
+      "strict_aliases": ["fan off", "turn off the fan", "stop the fan"],
       "payload": { "domain": "fan", "service": "turn_off", "entity": "context_aware" },
       "reply_template": "Fan stopped."
     },
@@ -44,6 +44,7 @@
       "type": "ha",
       "mode": "normal",
       "phrases": ["set temperature", "change the ac", "make it cooler", "adjust the climate"],
+      "strict_aliases": ["set temperature", "ac on", "ac off", "turn on the ac", "turn off the ac", "change the ac"],
       "payload": { "domain": "climate", "service": "set_temperature", "entity": "context_aware" },
       "reply_template": "Adjusting the climate."
     },
@@ -52,7 +53,7 @@
       "type": "ha",
       "mode": "normal",
       "phrases": ["turn on the tv", "watch television", "stop the tv", "tv off"],
-      "strict_aliases": ["tv on", "tv off"],
+      "strict_aliases": ["tv on", "tv off", "turn on the tv", "turn off the tv"],
       "payload": { "domain": "media_player", "service": "toggle", "entity": "context_aware" },
       "reply_template": "Updating media state."
     },
@@ -65,17 +66,20 @@
       "type": "sys",
       "mode": "normal",
       "phrases": ["stop", "shut up", "cancel", "quiet", "terminate", "halt"],
-      "strict_aliases": ["stop", "cancel", "silence"],
+      "strict_aliases": ["stop", "cancel", "silence", "shut up", "quiet", "stop talking", "halt"],
       "payload": { "action": "stop_audio" },
       "reply_template": "Stopped."
     },
-
     {
       "id": "GET_TIME",
       "type": "sys",
       "mode": "normal",
       "phrases": ["what time is it", "tell me the time", "what is the time now"],
-      "strict_aliases": ["what time is it", "what is the time now", "time now", "current time"],
+      "strict_aliases": [
+        "what time is it", "what is the time now", "time now", "current time", 
+        "what's the time", "what is the time", "tell me the time", "what time is it?", 
+        "what's the time?", "what is the time?"
+      ],
       "payload": { "action": "fetch_time" },
       "reply_template": "Checking the clock."
     },
@@ -83,8 +87,13 @@
       "id": "GET_DATE",
       "type": "sys",
       "mode": "normal",
-      "phrases": ["what is the date", "what's today's date", "tell me the date", "what day is it"],
-      "strict_aliases": ["date", "what is the date", "what is the date today", "today's date"],
+      "phrases": ["what is the date"," and date", "what's today's date", "tell me the date", "what day is it"],
+      "strict_aliases": [
+        "date", "what is the date", "what is the date today", "today's date", 
+        "what is the day today", "what day is it", "what is today", "what day is today",
+        "what is the date?", "what is the date today?", "what's the date today", 
+        "what's the date today?", "what is the date today ?", "tell me today's date"
+      ],
       "payload": { "action": "fetch_date" },
       "reply_template": "Checking the calendar."
     },
@@ -93,15 +102,16 @@
       "type": "sys",
       "mode": "normal",
       "phrases": ["yes", "yeah", "sure", "do it", "correct", "go ahead", "please", "continue", "resume"],
-      "strict_aliases": ["yes", "ok", "yep", "continue", "resume"],
+      "strict_aliases": ["yes", "ok", "yep", "continue", "resume", "yeah", "sure", "correct", "go ahead"],
       "payload": { "action": "confirm_yes" },
       "reply_template": "Confirmed."
-    },    {
+    },    
+    {
       "id": "CONFIRM_NO",
       "type": "sys",
       "mode": "normal",
       "phrases": ["no", "nope", "wrong", "don't", "nevermind", "abort"],
-      "strict_aliases": ["no", "cancel"],
+      "strict_aliases": ["no", "cancel", "nope", "wrong", "abort", "nevermind"],
       "payload": { "action": "confirm_no" },
       "reply_template": "Cancelled."
     },
@@ -114,7 +124,7 @@
       "type": "sys",
       "mode": "normal",
       "phrases": ["sudo access", "admin mode", "root terminal"],
-      "strict_aliases": ["sudo access"],
+      "strict_aliases": ["sudo access", "sudo login"],
       "payload": { "action": "trigger_sudo_challenge" },
       "reply_template": "Security Challenge Initiated."
     },
@@ -123,12 +133,12 @@
       "type": "sudo",
       "mode": "sudo",
       "phrases": ["reboot system", "restart core", "cycle power"],
-      "strict_aliases": ["reboot"],
+      "strict_aliases": ["reboot", "reboot system", "restart"],
       "payload": { "action": "reboot_host" },
       "reply_template": "Rebooting."
     }
   ],
-
+  
   "meta_topics": [
     {
       "id": "TOPIC_SCIENTIFIC",
@@ -210,7 +220,7 @@
         "look at the main go file",
         "explain the state manager code"
       ],
-      "filler_category": "syntheta",
+      "filler_category": "technical",
       "note": "Strict trigger for codebase RAG search. Heavily weighted with engineering and code terminology."
     },
     {
