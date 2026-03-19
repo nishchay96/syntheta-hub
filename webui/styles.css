@@ -90,9 +90,9 @@ input  { font-family: var(--font); }
   opacity: 0.15;
   animation: float 18s ease-in-out infinite;
 }
-.glow-blue   { width: 600px; height: 600px; background: var(--accent-blue);   top: -200px; left: -100px; animation-delay: 0s;   }
+.glow-blue    { width: 600px; height: 600px; background: var(--accent-blue);   top: -200px; left: -100px; animation-delay: 0s;   }
 .glow-purple { width: 500px; height: 500px; background: var(--accent-purple); bottom: -150px; right: 0; animation-delay: -6s;  }
-.glow-teal   { width: 400px; height: 400px; background: var(--accent-teal);   bottom: 100px; left: 30%;  animation-delay: -12s; }
+.glow-teal    { width: 400px; height: 400px; background: var(--accent-teal);   bottom: 100px; left: 30%;  animation-delay: -12s; }
 
 .theme-light .glow { opacity: 0.08; }
 
@@ -213,103 +213,51 @@ input  { font-family: var(--font); }
   user-select: none;
 }
 
+/* 🟢 WebGL ORB BASE (Replaces CSS blobs) */
+/* 🟢 FIX: Locked dimensions and absolute positioning to prevent Flexbox squishing */
 .orb {
-  position: relative;
-  width: 180px; height: 180px;
-  border-radius: 50%;
-  background: #000; /* Deep black core */
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  /* Removed overflow: hidden to allow fluid colors to bleed outward like a cloud! */
-  box-shadow: 0 10px 40px rgba(0,0,0,0.4);
-  transition: background 0.5s ease, transform 0.5s cubic-bezier(0.25, 1, 0.5, 1);
-  /* Use transform for hardware acceleration */
-  transform: translateZ(0); 
-}
-@media (max-height: 600px) { .orb { width: 140px; height: 140px; } }
-
-.theme-light .orb {
-  background: rgba(255, 255, 255, 0.4); /* Soft semi-transparent base to let colors burn through */
-  box-shadow: 0 8px 30px rgba(0,0,0,0.08), inset 0 2px 10px rgba(255,255,255,0.8);
+    position: relative;
+    width: 180px; 
+    height: 180px;
+    min-width: 180px;
+    min-height: 180px;
+    aspect-ratio: 1 / 1;
+    flex-shrink: 0;
+    border-radius: 50%;
+    overflow: hidden;
+    background: transparent;
+    box-shadow: 0 20px 40px rgba(30, 133, 255, 0.15);
+    transition: transform 0.6s cubic-bezier(0.23, 1, 0.32, 1), box-shadow 0.6s ease;
+    will-change: transform;
+    transform: translateZ(0); 
 }
 
-/* Base Idle Animation (Slight Breathing) */
-.orb.state-idle {
-  animation: orb-breathe-idle 4s ease-in-out infinite;
-  background: #000;
-}
-.theme-light .orb.state-idle {
-  background: #fff; /* Solid white only when idle so it looks clean */
-}
-@keyframes orb-breathe-idle {
-  0%, 100% { transform: scale(1) translateZ(0); }
-  50% { transform: scale(1.04) translateZ(0); box-shadow: 0 8px 40px rgba(0,0,0,0.5); }
+@media (max-height: 600px) { 
+    .orb { 
+        width: 140px; 
+        height: 140px; 
+        min-width: 140px;
+        min-height: 140px;
+    } 
 }
 
-/* Fluid Blobs for Active States */
-.orb-fluid {
-  position: absolute;
-  width: 180%; height: 180%; /* Even larger to create immense soft edge clouds */
-  top: -40%; left: -40%;
-  border-radius: 40% 60% 70% 30% / 40% 50% 60% 50%;
-  opacity: 0; /* Hidden by default when idle */
-  transition: opacity 0.6s ease, filter 0.5s ease;
-  filter: blur(28px); /* Extreme blur for that soft watercolor/cloud look */
-  mix-blend-mode: screen; /* Flawless color blending for light emissions */
+#glcanvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    aspect-ratio: 1 / 1;
+    border-radius: 50%; 
+    display: block;
+    pointer-events: none;
 }
 
-.theme-light .orb-fluid {
-  mix-blend-mode: multiply; /* Creates the rich, multi-color burning effect */
-  opacity: 0.85; /* Slightly expose the base to prevent it from getting too dark */
-}
-
-.orb-fluid-1 { background: var(--accent-blue); animation: fluid-spin 5s linear infinite; }
-.orb-fluid-2 { background: var(--accent-purple); animation: fluid-spin 7s linear infinite reverse; }
-.orb-fluid-3 { background: var(--accent-teal); animation: fluid-spin 9s linear infinite; }
-
-@keyframes fluid-spin {
-  0% { transform: rotate(0deg) translateZ(0); border-radius: 40% 60% 70% 30% / 40% 50% 60% 50%; }
-  50% { border-radius: 60% 40% 30% 70% / 60% 50% 40% 50%; }
-  100% { transform: rotate(360deg) translateZ(0); border-radius: 40% 60% 70% 30% / 40% 50% 60% 50%; }
-}
-
-/* ── ORB STATES ─────────────────────────────────────────── */
-
-/* PROCESSING & LISTENING */
-.orb.state-processing .orb-fluid,
-.orb.state-web_search .orb-fluid {
-  opacity: 0.9;
-}
-.orb.state-processing, .orb.state-web_search {
-  background: #000;
-  animation: orb-breathe-active 1.5s ease-in-out infinite alternate;
-}
-.theme-light .orb.state-processing, .theme-light .orb.state-web_search {
-  background: rgba(255, 255, 255, 0.2); /* Merge the inner circle with the rhythm */
-}
-
-@keyframes orb-breathe-active {
-  from { transform: scale(1.05) translateZ(0); }
-  to { transform: scale(1.1) translateZ(0); box-shadow: 0 0 50px rgba(79,142,247,0.4); }
-}
-
-/* WEBSearch: slightly different color emphasis */
-.orb.state-web_search .orb-fluid-1 { background: var(--accent-amber); filter: blur(20px); }
-.orb.state-web_search .orb-fluid-2 { background: var(--accent-pink); }
-
-/* SPEAKING: Live Audio Rhythm (Driven by JS) */
-.orb.state-speaking .orb-fluid {
-  opacity: 1;
-  filter: blur(12px); 
-  animation-duration: 1.5s; /* Faster fluid spin while speaking */
-}
+.orb.state-processing, 
+.orb.state-web_search, 
 .orb.state-speaking {
-  background: #000;
-  /* Transform & Box-shadow are controlled dynamically by app.js rhythm simulator */
-}
-.theme-light .orb.state-speaking { 
-  background: rgba(255, 255, 255, 0.1); /* Almost invisible core to let the burn colors take over entirely */
+    transform: scale(1.06);
+    box-shadow: 0 30px 60px rgba(30, 133, 255, 0.3);
 }
 
 .orb-label {
@@ -401,7 +349,6 @@ input  { font-family: var(--font); }
   gap: 10px;
 }
 
-/* Chat Input Row */
 .chat-input-row {
   display: flex;
   gap: 10px;
@@ -445,7 +392,6 @@ input  { font-family: var(--font); }
 .send-btn:hover { transform: scale(1.08); box-shadow: 0 6px 20px rgba(79,142,247,0.55); }
 .send-btn:active { transform: scale(0.95); }
 
-/* Control Pills Row */
 .control-pills {
   display: flex;
   gap: 8px;
@@ -663,3 +609,155 @@ input  { font-family: var(--font); }
 
 /* ── UTILITIES ──────────────────────────────────────────── */
 .hidden { display: none !important; }
+
+/* 🟢 ADDED: NETWORK DRAWER ──────────────────────────────── */
+.network-drawer {
+    position: fixed;
+    top: 0;
+    right: -100%;
+    width: 600px;
+    max-width: 100%;
+    height: 100vh;
+    background: rgba(10, 12, 18, 0.95);
+    backdrop-filter: blur(10px);
+    border-left: 1px solid var(--border);
+    box-shadow: -10px 0 30px rgba(0, 0, 0, 0.8);
+    transition: right 0.3s ease;
+    z-index: 9999;
+    display: flex;
+    flex-direction: column;
+}
+
+.network-drawer.open {
+    right: 0;
+}
+
+.network-header {
+    padding: 1rem 1.5rem;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: var(--bg-surface);
+}
+
+.net-info {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    background: rgba(11, 18, 27, 0.7);
+    padding: 6px 16px;
+    border: 1px solid var(--accent-pink);
+    box-shadow: 0 0 10px rgba(247, 101, 163, 0.2);
+    border-radius: 4px;
+    font-family: monospace;
+    font-size: 0.85rem;
+}
+
+.net-info-label {
+    color: var(--accent-pink);
+    font-weight: bold;
+    letter-spacing: 1px;
+}
+
+#selected-node-display {
+    color: var(--accent-teal);
+    text-shadow: 0 0 5px var(--accent-teal);
+    min-width: 100px;
+}
+
+/* ── NODE DATA OVERLAY ─────────────────────────── */
+.node-data-overlay {
+    position: absolute;
+    bottom: 20px;
+    left: 20px;
+    width: 280px;
+    background: rgba(10, 15, 22, 0.85);
+    backdrop-filter: blur(8px);
+    border: 1px solid var(--border);
+    border-left: 4px solid var(--accent-blue);
+    padding: 1rem;
+    border-radius: 4px;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+    z-index: 100;
+    transition: all 0.3s cubic-bezier(0.23, 1, 0.32, 1);
+    transform: translateX(0);
+    opacity: 1;
+}
+
+.node-data-overlay.hidden {
+    transform: translateX(-20px);
+    opacity: 0;
+    pointer-events: none;
+}
+
+.node-data-header {
+    font-size: 0.75rem;
+    font-weight: 800;
+    color: var(--text-muted);
+    letter-spacing: 2px;
+    margin-bottom: 0.8rem;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 0.4rem;
+}
+
+.node-data-content {
+    font-family: 'Inter', sans-serif;
+}
+
+.node-data-type {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    color: var(--accent-blue);
+    background: rgba(79, 142, 247, 0.1);
+    padding: 2px 6px;
+    border-radius: 2px;
+    margin-bottom: 0.5rem;
+    display: inline-block;
+}
+
+.node-data-label {
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    line-height: 1.4;
+}
+
+.network-body {
+    flex: 1;
+    position: relative;
+    overflow: hidden;
+}
+
+#networkCanvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+    cursor: grab;
+}
+
+#networkCanvas:active {
+    cursor: grabbing;
+}
+
+.network-footer-note {
+    position: absolute;
+    bottom: 16px;
+    right: 24px;
+    color: #a0f0ff;
+    font-size: 0.8rem;
+    letter-spacing: 1.5px;
+    pointer-events: none;
+    text-shadow: 0 0 5px #0ff;
+}
+
+/* ── BUTTON GLOW ANIMATION ── */
+@keyframes profile-glow {
+    0% { box-shadow: 0 0 0 rgba(42, 255, 182, 0); background: transparent; color: var(--text-primary); }
+    50% { box-shadow: 0 0 20px rgba(42, 255, 182, 0.8); background: rgba(42, 255, 182, 0.2); color: #2affb6; }
+    100% { box-shadow: 0 0 0 rgba(42, 255, 182, 0); background: transparent; color: var(--text-primary); }
+}
+
+.glow-once {
+    animation: profile-glow 2s ease-out;
+}

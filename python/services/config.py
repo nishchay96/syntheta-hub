@@ -1,6 +1,19 @@
 import os
 import logging
 
+# ==================== CONFIGURATION LOADING ====================
+def load_env_file(dotenv_path):
+    """Simple manual .env loader for systems without python-dotenv."""
+    if os.path.exists(dotenv_path):
+        with open(dotenv_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" in line:
+                    key, value = line.split("=", 1)
+                    os.environ.setdefault(key.strip(), value.strip())
+
 # ==================== LOGGING ====================
 logging.basicConfig(
     level=logging.INFO,
@@ -14,6 +27,9 @@ BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../'))
 TEMP_DIR = os.path.join(BASE_DIR, "assets", "temp")
 LOG_DIR  = os.path.join(BASE_DIR, "logs")
 
+# Load environment variables from .env if it exists
+load_env_file(os.path.join(BASE_DIR, ".env"))
+
 os.makedirs(TEMP_DIR, exist_ok=True)
 os.makedirs(LOG_DIR,  exist_ok=True)
 
@@ -23,8 +39,9 @@ KNOWLEDGE_VAULT_PATH = os.path.join(BASE_DIR, "assets", "knowledge")
 os.makedirs(KNOWLEDGE_VAULT_PATH, exist_ok=True)
 
 # ==================== AUDIO SETTINGS ====================
-os.environ["HF_HUB_OFFLINE"]      = "1"
-os.environ["TRANSFORMERS_OFFLINE"] = "1"
+# Force offline modes (respect existing env vars if any, else default to 1)
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 AGC_TARGET          = 0.03
 TRANSCRIPTION_BOOST = 2.0
@@ -51,5 +68,5 @@ ENABLE_SERVER_WAKE_CHECK = False
 WAKE_MODELS = []
 
 # Home Assistant
-HA_URL   = "http://localhost:8123/api/services"
-HA_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiIwNzlmNDM0YzcxZTI0OTRhOWRlM2IzMDIxMzI2MDE1YyIsImlhdCI6MTc3MjA4OTc1NiwiZXhwIjoyMDg3NDQ5NzU2fQ.biQiFF7PbiCU1-wL5BEhliaiIRlFEuBNepCXDzKLXL0"
+HA_URL   = os.getenv("HA_URL", "http://localhost:8123/api/services")
+HA_TOKEN = os.getenv("HA_TOKEN", "")

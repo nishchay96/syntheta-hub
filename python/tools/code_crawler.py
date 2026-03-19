@@ -6,7 +6,7 @@ import re
 from sentence_transformers import SentenceTransformer
 
 # ==================== ✅ CONFIGURATION ====================
-PROJECT_ROOT = "/media/nishchay/Study/syntheta-hub"
+PROJECT_ROOT = "."
 DB_PATH = os.path.join(PROJECT_ROOT, "assets/database")
 # 🟢 Changed to MiniLM to match the new KnowledgeManager Scout
 MODEL_PATH = os.path.join(PROJECT_ROOT, "assets/models/all-MiniLM-L6-v2")

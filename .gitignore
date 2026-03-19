@@ -1,12 +1,32 @@
-# 1. Ignore EVERYTHING
+# Python Environments & Cache
+**/venv/
+**/venv-audio/
+**/__pycache__/
+*.py[cod]
+*$py.class
+.env
+.webui_secret_key
 
-venv/
+# Go Binaries & Hub
+**/syntheta-hub
+syntheta_hub
+syntheta_hub_bin
+
+# Models & Assets (Usually large, should be downloaded or managed via LFS)
+# Ignore all assets by default, un-ignore essential system sounds/icons
 assets/
-__pycache__/
-*.pyc
-.DS_Store
-piper
-venv-audio/
-openclaw/
-.vscode
+!assets/system/
+
+# External Engines
+piper/
+
+# Logs & Temporary Files
 logs/
+*.log
+memory_export.csv
+
+# IDEs & System
+.vscode/
+.DS_Store
+*.swp
+*.bakmemory_export.csv

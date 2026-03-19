@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+pydantic
+requests
+numpy
+soundfile
+torch
+kokoro
+python-dotenv

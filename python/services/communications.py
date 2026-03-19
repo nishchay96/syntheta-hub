@@ -239,3 +239,36 @@ class HomeAssistantClient:
                 
         except Exception as e:
             logger.error(f"HA Integration Failure: {e}")
+
+class WebUIInjector(threading.Thread):
+    """Listens on 9002 for direct text injection from the Web UI."""
+    def __init__(self, engine_ref):
+        super().__init__(daemon=True)
+        self.engine = engine_ref
+        self.port = 9002
+
+    def run(self):
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind(('127.0.0.1', self.port))
+        server.listen(5)
+        logger.info(f"🕸️ Web UI Injector Backdoor open on TCP {self.port}")
+        
+        while True:
+            conn, _ = server.accept()
+            with conn:
+                data = conn.recv(2048)
+                if data:
+                    try:
+                        payload = json.loads(data.decode('utf-8'))
+                        sat_id = int(payload.get('sat_id', 1))
+                        text = payload.get('content', '')
+                        
+                        logger.info(f">>> 📝 WEB INPUT [Sat {sat_id}]: '{text}'")
+                        
+                        # Route this directly into your cognitive loop.
+                        # Replace `self.engine.process_text_pipeline` with the exact 
+                        # function your engine uses when Whisper yields a final string.
+                        self.engine.handle_input(sat_id, text)
+                    except Exception as e:
+                        logger.error(f"Failed to inject web text: {e}")

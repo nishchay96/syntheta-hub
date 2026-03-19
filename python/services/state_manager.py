@@ -9,6 +9,7 @@ import wave
 import contextlib
 import sys
 import os
+from datetime import datetime
 from typing import Dict
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '../../'))
@@ -31,9 +32,7 @@ class EngineState:
         self.thresholds    = {}     # {sat_id: float}
 
         # ── Timers ─────────────────────────────────────────────
-        self.last_active_time = {}  # {sat_id: time} — resets on every audio packet
-        # 🟢 last_interaction_time — resets ONLY on actual user speech
-        # NightWatchman reads this for idle detection
+        self.last_active_time = {}  
         self.last_interaction_time = 0.0
 
         self.silence_start  = {}
@@ -43,7 +42,7 @@ class EngineState:
         self.session_start_time = 0.0
         self.is_conversation    = False
         self.deaf_until         = 0.0
-        self.skip_byte_counter  = 0     # Bytes to skip after wake collision
+        self.skip_byte_counter  = 0     
 
         # ── Modes ──────────────────────────────────────────────
         self.state        = {}
@@ -57,8 +56,59 @@ class EngineState:
         self.resume_pending   = {}
         self.is_muted         = False
 
-        # ── Cognitive State (per satellite) ───────────────────
+        # ── Cognitive State & Identity (per satellite) ─────────
         self.cognitive: Dict[int, CognitiveState] = {}
+        
+        # 🟢 NEW: Identity Tracker for Multi-User Households
+        self.identity_state = {} # {sat_id: {"active_user": "Guest", "loaded_date": "YYYY-MM-DD", "has_prompted": False}}
+
+    # ----------------------------------------------------------
+    # IDENTITY & PROFILE MANAGEMENT
+    # ----------------------------------------------------------
+    def _init_identity_state(self, sat_id: int):
+        if sat_id not in self.identity_state:
+            self.identity_state[sat_id] = {
+                "active_user": "Guest",
+                "loaded_date": datetime.now().strftime("%Y-%m-%d"),
+                "has_prompted": False
+            }
+
+    def _check_daily_rollover(self, sat_id: int):
+        """Checks if the date has changed. If so, wipes trust and resets to Guest."""
+        self._init_identity_state(sat_id)
+        current_date = datetime.now().strftime("%Y-%m-%d")
+        
+        if self.identity_state[sat_id]["loaded_date"] != current_date:
+            logger.info(f"🌅 Midnight Rollover [Sat {sat_id}]. Resetting active user to Guest.")
+            self.identity_state[sat_id]["active_user"] = "Guest"
+            self.identity_state[sat_id]["loaded_date"] = current_date
+            self.identity_state[sat_id]["has_prompted"] = False
+
+    def get_active_user(self, sat_id: int) -> str:
+        self._check_daily_rollover(sat_id)
+        return self.identity_state[sat_id]["active_user"]
+
+    def set_active_user(self, sat_id: int, username: str):
+        """Triggered by the engine when NLU detects 'I am [Name]'."""
+        self._init_identity_state(sat_id)
+        # Sanitize for file paths
+        clean_name = re.sub(r'[^a-zA-Z0-9_]', '', username).lower().strip()
+        
+        self.identity_state[sat_id]["active_user"] = clean_name
+        self.identity_state[sat_id]["loaded_date"] = datetime.now().strftime("%Y-%m-%d")
+        self.identity_state[sat_id]["has_prompted"] = True
+        logger.info(f"👤 Profile Locked [Sat {sat_id}]: {clean_name}")
+
+    def mark_identity_prompted(self, sat_id: int):
+        """Silences the identity nag prompt for the rest of the day."""
+        self._init_identity_state(sat_id)
+        self.identity_state[sat_id]["has_prompted"] = True
+
+    def needs_identity_prompt(self, sat_id: int) -> bool:
+        """Returns True if it's a Guest and we haven't nagged them yet today."""
+        self._check_daily_rollover(sat_id)
+        state = self.identity_state[sat_id]
+        return state["active_user"] == "Guest" and not state["has_prompted"]
 
     # ----------------------------------------------------------
     # COGNITIVE STATE INIT
@@ -68,19 +118,20 @@ class EngineState:
             self.cognitive[sat_id] = {
                 "topic":          "general",
                 "entities":       {},
-                "history_buffer": [],   # [{role, content}, ...]
-                "summary":        "",   # Compressed summary of older turns
+                "history_buffer": [],   
+                "summary":        "",   
                 "last_interaction": 0.0,
                 "active_subject": "general",
                 "is_active":      False,
             }
 
     # ----------------------------------------------------------
-    # CONTEXT UPDATE — called by engine after transcription
+    # CONTEXT UPDATE
     # ----------------------------------------------------------
     def update_context(self, sat_id: int, user_text: str,
                        new_entities: dict, force_reset: bool = False):
         self._init_cognitive_state(sat_id)
+        self._check_daily_rollover(sat_id)
 
         if force_reset:
             logger.info(f"🔄 Context Pivot for Sat {sat_id}.")
@@ -95,7 +146,6 @@ class EngineState:
         self._append_history(sat_id, "user", user_text)
         self.cognitive[sat_id]["last_interaction"] = time.time()
 
-        # 🟢 Update global interaction clock — NightWatchman idle check reads this
         self.last_interaction_time = time.time()
 
     def get_recent_context(self, sat_id: int):
@@ -104,16 +154,10 @@ class EngineState:
 
     def commit_assistant_response(self, sat_id: int, text: str,
                                   active_subject: str = "general"):
-        """
-        Saves assistant response to history.
-        Triggers 1B summarizer if history exceeds MAX_HISTORY_PAIRS.
-        active_subject stored for resume prompt generation.
-        """
         self._init_cognitive_state(sat_id)
         self._append_history(sat_id, "assistant", text)
         self.cognitive[sat_id]["active_subject"] = active_subject
 
-        # Trigger summarizer if history is getting long
         pairs = len(self.cognitive[sat_id]["history_buffer"]) // 2
         if pairs >= MAX_HISTORY_PAIRS:
             import threading
@@ -124,7 +168,6 @@ class EngineState:
             ).start()
 
     def _append_history(self, sat_id: int, role: str, text: str):
-        """Appends turn to history buffer. Hard cap at MAX_HISTORY_PAIRS * 2 entries."""
         buffer = self.cognitive[sat_id]["history_buffer"]
         buffer.append({"role": role, "content": text})
         hard_cap = MAX_HISTORY_PAIRS * 2
@@ -132,21 +175,15 @@ class EngineState:
             self.cognitive[sat_id]["history_buffer"] = buffer[-hard_cap:]
 
     # ----------------------------------------------------------
-    # 1B HISTORY SUMMARIZER — fires in background thread
+    # 1B HISTORY SUMMARIZER
     # ----------------------------------------------------------
     def _summarize_history(self, sat_id: int):
-        """
-        Compresses the oldest half of history into a summary string.
-        Uses llama3.2:1b — lightweight, never blocks main LLM.
-        Runs in a daemon thread so it never blocks engine.
-        """
         self._init_cognitive_state(sat_id)
         buffer = self.cognitive[sat_id]["history_buffer"]
 
         if len(buffer) < MAX_HISTORY_PAIRS * 2:
-            return  # Nothing to compress yet
+            return  
 
-        # Take the oldest half to summarise, keep the newest half live
         half       = len(buffer) // 2
         old_turns  = buffer[:half]
         keep_turns = buffer[half:]
@@ -190,18 +227,11 @@ class EngineState:
     def build_golden_packet(self, sat_id: int, user_text: str,
                              emotion: str,
                              memory_context: str = "") -> GoldenPacket:
-        """
-        Assembles the complete GoldenPacket for LLMBridge.
-
-        memory_context — injected by engine from get_context_fast()
-                         (JSON bucket node facts, current session)
-        memory_tank    — filled by router/engine from SQL nomic retrieval
-                         or web_data (set after enrich_packet)
-        """
         self._init_cognitive_state(sat_id)
+        self._check_daily_rollover(sat_id)
+        
         state = self.cognitive[sat_id]
 
-        # Build history string — include summary of older turns if present
         history_parts = []
         summary = state.get("summary", "")
         if summary:
@@ -213,37 +243,27 @@ class EngineState:
 
         history_str = "\n".join(history_parts)
 
-        # Update interaction clock
         self.last_interaction_time = time.time()
 
         return {
-            # Core identity
             "role":          "You are Syntheta, a concise and helpful AI.",
             "ctx":           state["topic"],
             "emotion":       emotion,
             "entities":      state.get("entities", {}),
-
-            # Input
             "input":         user_text,
-
-            # History (engine will override with sliding window)
             "history":       history_str,
-
-            # Memory layers — populated by engine + router
-            "memory_context": memory_context,  # JSON bucket facts (current session)
-            "memory_tank":    "",              # Set by engine after enrich_packet
-
-            # Routing — set by LibrarianRouter.enrich_packet()
+            "memory_context": memory_context, 
+            "memory_tank":    "",              
             "route_taken":        "general_no_web",
             "needs_memory":       False,
             "matched_memory_node": None,
             "web_data":           None,
-
-            # Model selection — default, router can override
             "model":       "llama3.2:3b",
-
-            # Abort check — set by engine for barge-in detection
             "abort_check": None,
+            
+            # 🟢 NEW: Identity payloads passed downstream to engine.py
+            "active_user":           self.get_active_user(sat_id),
+            "needs_identity_prompt": self.needs_identity_prompt(sat_id)
         }
 
     # ----------------------------------------------------------
@@ -276,6 +296,7 @@ class EngineState:
     # UTILITIES
     # ----------------------------------------------------------
     def register_wake_event(self, sat_id: int):
+        self._check_daily_rollover(sat_id)
         self.deaf_until              = 0.0
         self.last_active_time[sat_id] = time.time()
         self.last_interaction_time   = time.time()
@@ -285,7 +306,6 @@ class EngineState:
 
     def update_noise_floor(self, sat_id: int, floor_val: float):
         self.thresholds[sat_id] = floor_val
-        logger.info(f"🧠 Noise Floor updated: Sat {sat_id} = {floor_val}")
 
     def get_wav_duration(self, filepath: str) -> float:
         try:

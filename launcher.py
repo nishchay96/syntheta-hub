@@ -6,12 +6,13 @@ import time
 import shutil
 import signal
 import glob
+import logging # Corrected import
 import requests
+import sqlite3
 
 # ==============================================================================
 # ⚙️ CONFIGURATION
 # ==============================================================================
-# Robust Root Path Detection
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Venv Paths
@@ -23,8 +24,8 @@ VENV_AUDIO_PATH = os.path.join(ROOT_DIR, "venv-audio")
 GO_DIR = os.path.join(ROOT_DIR, "go")
 PY_DIR = os.path.join(ROOT_DIR, "python")
 
-# The Surgical List
-TARGET_PORTS = [5555, 5556, 6000, 6002, 9001]
+# The Surgical List (Added Port 8000 for the Web Gateway)
+TARGET_PORTS = [5555, 5556, 6000, 6002, 8000, 8001, 9001]
 OLLAMA_API_URL = "http://localhost:11434/api/tags"
 
 def log(msg, level="INFO"):
@@ -56,11 +57,8 @@ def get_brain_env(audio_site_path):
     current_pp = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = f"{audio_site_path}{os.pathsep}{current_pp}" if current_pp else audio_site_path
     
-    # Existing Offline Enforcements
     env["HF_HUB_OFFLINE"] = "1" 
     env["TRANSFORMERS_OFFLINE"] = "1"
-    
-    # 🟢 NEW FIX: Nuke ChromaDB Telemetry to prevent boot hangs
     env["CHROMA_TELEMETRY"] = "false" 
     
     return env
@@ -91,18 +89,19 @@ def ensure_clean_slate():
     for port in TARGET_PORTS:
         kill_process_on_port(port)
         
-    # 🟢 SURGICAL DB FIX: Wiping the corrupted memory backlogs on boot
     db_path = os.path.join(ROOT_DIR, "assets", "database", "syntheta_ledger.db")
     if os.path.exists(db_path):
         log("Flushing Memory Queue & OpenClaw Backlog...", "INFO")
         try:
-            subprocess.run([
-                "sqlite3", db_path, 
-                "DELETE FROM memory_queue; DELETE FROM openclaw_jobs;"
-            ], check=True)
+            # Native Python execution instead of OS subprocess
+            with sqlite3.connect(db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM memory_queue;")
+                cursor.execute("DELETE FROM openclaw_jobs;")
+                conn.commit()
             log("✅ SQLite Backlog Cleared.", "INFO")
         except Exception as e:
-            log(f"⚠️ Failed to clear SQLite DB: {e}", "WARN")
+            log(f"⚠️ Failed to clear SQLite DB natively: {e}", "WARN")
             
     time.sleep(0.5)
 
@@ -144,10 +143,6 @@ def main():
     term_cmd = check_terminal_installed()
     ensure_ollama_ready()
 
-    # 🟢 GHOST INDEXING REMOVED: 
-    # The slow 'code_crawler.py' BGE-M3 Librarian block has been completely stripped.
-
-    # 1. COMPILE GO
     log("Compiling Go Hub from Module Root...", "BOOT")
     try:
         subprocess.run(
@@ -161,8 +156,18 @@ def main():
         sys.exit(1)
 
     while True:
+        gateway_process = None
         try:
             ensure_clean_slate()
+
+            # 1. LAUNCH WEB GATEWAY (Strictly Port 8001)
+            log("Launching Web Gateway on Port 8001...", "BOOT")
+            gateway_process = subprocess.Popen(
+                [VENV_PYTHON, "-m", "uvicorn", "python.web_gateway:app", "--host", "0.0.0.0", "--port", "8001"],
+                cwd=ROOT_DIR,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
 
             # 2. LAUNCH GO BRIDGE
             log("Launching Audio Bridge (Go)...", "BOOT")
@@ -182,7 +187,7 @@ def main():
 
             time.sleep(2) 
 
-            # 3. LAUNCH PYTHON BRAIN
+            # 3. LAUNCH PYTHON BRAIN (RESTORED)
             log(f"Launching Sovereign Brain...", "BOOT")
             print("------------------------------------------")
             
@@ -193,22 +198,30 @@ def main():
                 env=brain_env
             )
 
+            # 4. EXIT HANDLING
             if brain_process.returncode == 42:
                 log("🔄 Restart requested...", "BOOT")
+                if gateway_process:
+                    gateway_process.terminate()
                 time.sleep(1)
                 continue
             else:
                 log("Shutting down.", "INFO")
+                if gateway_process:
+                    gateway_process.terminate()
                 break
 
         except KeyboardInterrupt:
             print("\n")
             log("Manual Interrupt.", "WARN")
+            if gateway_process:
+                gateway_process.terminate()
             break
         except Exception as e:
             log(f"Launcher Error: {e}", "ERROR")
+            if gateway_process:
+                gateway_process.terminate()
             break
-
     ensure_clean_slate()
     print("Goodbye.")
 

@@ -68,17 +68,20 @@ class DatabaseManager:
                     )
                 ''')
 
-                # Core Memory
+                # 🟢 FIX: Core Memory is now partitioned by user_id. 
+                # The UNIQUE constraint is a composite of (user_id, entity_key)
                 cursor.execute('''
                     CREATE TABLE IF NOT EXISTS core_memory (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         last_updated REAL NOT NULL,
                         date TEXT NOT NULL,
+                        user_id TEXT NOT NULL DEFAULT 'Guest',
                         bucket TEXT NOT NULL,
-                        entity_key TEXT UNIQUE NOT NULL,
+                        entity_key TEXT NOT NULL,
                         entity_value TEXT NOT NULL,
                         confidence_score INTEGER DEFAULT 100,
-                        vector_blob BLOB
+                        vector_blob BLOB,
+                        UNIQUE(user_id, entity_key)
                     )
                 ''')
 
@@ -113,11 +116,11 @@ class DatabaseManager:
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_ledger_date    ON event_ledger(date);")
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_ledger_ts      ON event_ledger(timestamp);")
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_telemetry_date ON reflex_telemetry(date);")
-                cursor.execute("CREATE INDEX IF NOT EXISTS idx_core_key       ON core_memory(entity_key);")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_core_user_key  ON core_memory(user_id, entity_key);")
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_queue_status   ON memory_queue(status);")
 
                 conn.commit()
-                logger.info("✅ Database Architecture Upgraded: Structured/Semantic Split Active.")
+                logger.info("✅ Database Architecture Upgraded: Multi-User Vector Isolation Active.")
 
         except Exception as e:
             logger.error(f"❌ Database Init Failed: {e}")
@@ -169,11 +172,6 @@ class DatabaseManager:
             return None
 
     def get_recent_events(self, limit=5):
-        """
-        Returns the last N resolved queries from the event ledger.
-        Used by ContextAssembler to build the RECENT TIMELINE block.
-        Called on every LLM turn — must be fast.
-        """
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
@@ -183,7 +181,6 @@ class DatabaseManager:
                     (limit,)
                 )
                 rows = cursor.fetchall()
-                # Return in chronological order (oldest first) so LLM reads naturally
                 return [row[0] for row in reversed(rows)]
         except Exception as e:
             logger.error(f"❌ get_recent_events failed: {e}")
@@ -230,63 +227,62 @@ class DatabaseManager:
             logger.error(f"❌ Failed to close reflex action: {e}")
 
     # ----------------------------------------------------------
-    # CORE MEMORY
+    # CORE MEMORY (USER-PARTITIONED)
     # ----------------------------------------------------------
-    def save_core_fact(self, bucket, entity_key, entity_value,
+    # 🟢 FIX: Added user_id parameter and updated SQL commands to enforce partition
+    def save_core_fact(self, user_id, bucket, entity_key, entity_value,
                        confidence=100, vector=None):
-        """UPSERT — enforces unique dot-notation keys, stores Nomic vector."""
         date_str     = datetime.now().strftime("%Y-%m-%d")
         vector_bytes = (np.array(vector, dtype=np.float32).tobytes()
                         if vector is not None else None)
+        
+        if isinstance(entity_value, dict):
+            entity_value = json.dumps(entity_value, ensure_ascii=False)
+            
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
                     INSERT INTO core_memory
-                        (last_updated, date, bucket, entity_key,
+                        (last_updated, date, user_id, bucket, entity_key,
                          entity_value, confidence_score, vector_blob)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(entity_key) DO UPDATE SET
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(user_id, entity_key) DO UPDATE SET
                         last_updated     = excluded.last_updated,
                         date             = excluded.date,
                         bucket           = excluded.bucket,
                         entity_value     = excluded.entity_value,
                         confidence_score = excluded.confidence_score,
                         vector_blob      = excluded.vector_blob
-                ''', (time.time(), date_str, bucket, entity_key.lower(),
+                ''', (time.time(), date_str, user_id, bucket, entity_key.lower(),
                       entity_value, confidence, vector_bytes))
                 conn.commit()
-                logger.info(f"🧠 UPSERT: [{entity_key}] → {entity_value}")
+                logger.info(f"🧠 UPSERT: [{user_id} | {entity_key}] → Node Captured")
         except Exception as e:
             logger.error(f"❌ Failed to save core fact: {e}")
 
-    def delete_core_fact(self, key):
-        """Negation protocol — erases a fact by key."""
+    def delete_core_fact(self, user_id, key):
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
-                    "DELETE FROM core_memory WHERE entity_key=?",
-                    (key.lower(),))
+                    "DELETE FROM core_memory WHERE user_id=? AND entity_key=?",
+                    (user_id, key.lower()))
                 if cursor.rowcount > 0:
-                    logger.info(f"🗑️ Erased fact: '{key}'")
+                    logger.info(f"🗑️ Erased fact: '{key}' for user '{user_id}'")
                 conn.commit()
         except Exception as e:
             logger.error(f"❌ Failed to delete core fact: {e}")
 
-    def get_all_core_facts(self):
-        """
-        Returns all core memory facts as {entity_key: {value, bucket}} dict.
-        Used by ContextAssembler to build the USER PROFILE block and
-        guide direct bucket routing in _search_knowledge_graph().
-        """
+    def get_all_core_facts(self, user_id):
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
                     "SELECT entity_key, entity_value, bucket "
-                    "FROM core_memory "
-                    "ORDER BY last_updated DESC"
+                    "FROM core_memory WHERE user_id=? "
+                    "ORDER BY last_updated DESC",
+                    (user_id,)
                 )
                 return {
                     row[0]: {"value": row[1], "bucket": row[2]}
@@ -296,18 +292,17 @@ class DatabaseManager:
             logger.error(f"❌ get_all_core_facts failed: {e}")
             return {}
 
-    def get_relevant_memories(self, query_vector, top_k=3):
+    def get_relevant_memories(self, user_id, query_vector, top_k=3):
         """
-        Cosine-similarity search over core_memory vector_blob column.
-        Called by engine._handle_normal_command() for nomic-based retrieval.
-        Only returns facts with similarity > 0.50.
+        Cosine-similarity search over core_memory vector_blob column, strictly filtered by user_id.
         """
         try:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
                     "SELECT entity_key, entity_value, vector_blob "
-                    "FROM core_memory WHERE vector_blob IS NOT NULL"
+                    "FROM core_memory WHERE vector_blob IS NOT NULL AND user_id=?",
+                    (user_id,)
                 )
                 rows = cursor.fetchall()
 
@@ -323,16 +318,23 @@ class DatabaseManager:
                 scored.append((similarity, key, value))
 
             scored.sort(reverse=True, key=lambda x: x[0])
-            return [
-                f"{m[1]}: {m[2]}"
-                for m in scored[:top_k]
-                if m[0] > 0.50
-            ]
+            
+            results = []
+            for sim, key, value_str in scored[:top_k]:
+                if sim > 0.50:
+                    try:
+                        val_dict = json.loads(value_str)
+                        formatted_val = json.dumps(val_dict, indent=2)
+                        results.append(f"[{key.upper()}]\n{formatted_val}")
+                    except json.JSONDecodeError:
+                        results.append(f"[{key.upper()}]\n{value_str}")
+                        
+            return results
 
         except Exception as e:
             logger.error(f"❌ Semantic Retrieval Failed: {e}")
             return []
-
+        
     # ----------------------------------------------------------
     # ASYNC QUEUE (NIGHTWATCHMAN)
     # ----------------------------------------------------------

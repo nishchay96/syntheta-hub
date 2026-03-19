@@ -105,7 +105,7 @@ func StopPlayback(satID int) {
 func PlayAudio(satID int, inputPath string) error {
 	// 🟢 FIX: Absolute Path Resolver
 	// This anchors all relative paths to the confirmed project root
-	projectRoot := "/media/nishchay/Study/syntheta-hub"
+	projectRoot := ".."
 	finalPath := inputPath
 
 	if !filepath.IsAbs(inputPath) {

@@ -312,64 +312,90 @@ Output raw JSON only.
         return bool(re.search(PERSON_INTENT_PATTERN, text.lower()))
 
     # ----------------------------------------------------------
-    # STAGE 2A: CREATE NODE — new bucket
-    # Ported from tester._create_node()
+    # STAGE 2A: CREATE NODE (FEW-SHOT OPTIMIZED)
     # ----------------------------------------------------------
-    def _create_node(self, fact_summary: str, bucket_name: str,
-                     current_date: str) -> dict:
+    def _create_node(self, fact_summary: str, bucket_name: str, current_date: str) -> dict:
         work_rule = ""
         if bucket_name == "Work":
-            work_rule = '\nRULE 1 (NON-NEGOTIABLE): Node name MUST be "Self". No exceptions.'
+            work_rule = '\nRULE: Node name MUST be "Self". No exceptions.'
 
-        prompt = f"""Extract facts from this sentence into a JSON memory node.
+        prompt = f"""Extract facts into a strictly formatted JSON memory node.
 
 SENTENCE: "{fact_summary}"
 BUCKET: {bucket_name}
-DATE: {current_date}
-{work_rule}
+DATE: {current_date}{work_rule}
 
 RULES:
-1. Extract ONLY what is explicitly stated. No invented attributes.
-2. ONE node = ONE entity. Node name = the main subject noun.
-3. Use spaces not underscores in node names.
-4. Accessories are ATTRIBUTES of main node, not separate nodes.
-5. Minimal info → use {{"Status": "Owned"}} or {{"Status": "Noted"}}.
-6. Correct spelling. No "User" in output.
-7. NEVER store physical absence/presence as attrs (Missing, Presence, Absent, Available).
+1. The JSON key MUST be the specific entity name (the device, food, person, or topic).
+2. The value MUST be a dictionary of attributes.
+3. NEVER store physical absence/presence as attrs (Missing, Presence, Absent).
+4. Do not include the bucket name in the output.
 
-CRITICAL NODE NAMING:
-- Vehicle → vehicle name ("Fortuner", not "Driver")
-- Device → device name ("OnePlus 12", not "Order")
-- Work → "Self" ALWAYS
-- Food → the food item ("Dark Chocolate")
-- People → person's first name ("Priya")
-- Health → the condition ("Lower Back Pain")
+EXAMPLES:
+Input: "I like dark chocolate"
+Output: {{"Dark Chocolate": {{"Preference": "Liked"}}}}
 
-Examples:
-"Wife is Priya" → {{"Priya": {{"Relation": "Wife"}}}}
-"Works at Infosys" → {{"Self": {{"Company": "Infosys"}}}}
-"Got promoted to senior engineer" → {{"Self": {{"Role": "Senior Engineer"}}}}
-"OnePlus 12 ordered online" → {{"OnePlus 12": {{"Status": "Ordered", "Purchase method": "Online"}}}}
-"Has cycle for morning rides" → {{"Cycle": {{"Usage": "Morning rides"}}}}
-"Dislikes horror movies" → {{"Horror Movies": {{"Preference": "Disliked"}}}}
-"Lower back pain for a week" → {{"Lower Back Pain": {{"Duration": "1 week"}}}}
+Input: "Wife is Priya"
+Output: {{"Priya": {{"Relation": "Wife"}}}}
+
+Input: "Works at Infosys"
+Output: {{"Self": {{"Company": "Infosys"}}}}
+
+Input: "I drive a red Toyota"
+Output: {{"Toyota": {{"Color": "Red", "Status": "Owned"}}}}
 
 Extract: "{fact_summary}"
-Output ONE JSON object. No markdown."""
+Output ONE JSON object. Raw JSON only."""
 
         raw_blocks = self._call_llm(prompt, enforce_json=True)
-        if not raw_blocks:
-            return None
+        if not raw_blocks: return None
         raw_blocks.sort(key=len, reverse=True)
         for raw in raw_blocks:
             try:
                 r = json.loads(raw)
-                if isinstance(r, dict) and r:
-                    return r
-            except Exception:
-                continue
+                if isinstance(r, dict) and r: return r
+            except Exception: continue
         return None
 
+    # ----------------------------------------------------------
+    # STAGE 2B: MERGE NODE (FEW-SHOT OPTIMIZED)
+    # ----------------------------------------------------------
+    def _merge_node(self, existing_nodes: dict, fact_summary: str,
+                    bucket_name: str, current_date: str, target_node: str = None) -> dict:
+        nodes_json = json.dumps(existing_nodes, indent=2)
+        target_hint = f'\nTARGET NODE: "{target_node}" — update this node if fact is about it.' if target_node and target_node in existing_nodes else ""
+
+        prompt = f"""Update a memory JSON with one new fact.
+
+DATE: {current_date}
+BUCKET: {bucket_name}{target_hint}
+
+EXISTING NODES:
+{nodes_json}
+
+NEW FACT: "{fact_summary}"
+
+RULES:
+1. Match fact to correct existing node by entity name, OR create a new root node.
+2. OVERWRITE conflicting keys. PRESERVE ALL existing nodes exactly.
+3. Extract ONLY what is in NEW FACT. Do not invent.
+
+EXAMPLES (Merging "Color: Blue" into existing Toyota node):
+Existing: {{"Toyota": {{"Status": "Owned"}}}}
+New Fact: "My Toyota is blue"
+Output: {{"Toyota": {{"Status": "Owned", "Color": "Blue"}}}}
+
+Output the COMPLETE updated nodes dict. Raw JSON only."""
+
+        raw_blocks = self._call_llm(prompt, enforce_json=True)
+        if not raw_blocks: return None
+        raw_blocks.sort(key=len, reverse=True)
+        for raw in raw_blocks:
+            try:
+                r = json.loads(raw)
+                if isinstance(r, dict) and r: return r
+            except Exception: continue
+        return None
     # ----------------------------------------------------------
     # STAGE 2B: MERGE NODE — existing bucket
     # Ported from tester._merge_node()
@@ -820,23 +846,31 @@ class MemoryWorker:
                 logger.error(f"⚠️ Archive failed for task {task_id}: {e}")
 
     # ----------------------------------------------------------
-    # PROCESS TASK — sync JSON files for this satellite to SQL
+    # PROCESS TASK — Run LLM Extraction THEN sync to SQL
     # ----------------------------------------------------------
     def _process_task(self, raw_payload: str, task_id: int) -> bool:
         try:
-            data     = json.loads(raw_payload)
-            sat_id   = data.get("sat_id", 1)
+            data         = json.loads(raw_payload)
+            sat_id       = data.get("sat_id", 1)
+            user_query   = data.get("user_query", "")
+            llm_response = data.get("llm_response", "")
+            
             user_dir = self.capture._get_user_dir(sat_id)
-            if not os.path.exists(user_dir):
-                return True
-            synced = self._sync_vault_to_sql(
-                user_dir, data.get("user_query", ""))
-            logger.info(f"🧠 Task {task_id}: synced {synced} nodes to SQL.")
+            
+            # 🟢 FIX 1: Run the LLM Extraction Pipeline first! 
+            # This generates the perfectly nested JSON and MD files.
+            logger.info(f"🧠 Task {task_id}: Extracting JSON nodes via LLM...")
+            self.capture._background_triage(sat_id, user_query, llm_response)
+
+            # 🟢 FIX 2: Now that JSON files exist, sync them to the SQL Vector DB.
+            synced = self._sync_vault_to_sql(user_dir, user_query)
+            logger.info(f"🧠 Task {task_id}: Synced {synced} nodes to SQL.")
             return True
+            
         except Exception as e:
             logger.error(f"❌ Task crashed: {e}", exc_info=True)
             return False
-
+        
     def _sync_all_vaults(self):
         for sat_dir in glob.glob(os.path.join(self.vault_path, "sat_*")):
             if os.path.isdir(sat_dir):
@@ -850,6 +884,9 @@ class MemoryWorker:
         - New → Nomic vector → upsert SQL
         """
         synced = 0
+        # 🟢 FIX: Extract the active user from the directory path
+        user_name = os.path.basename(os.path.normpath(user_dir))
+
         for json_file in glob.glob(os.path.join(user_dir, "Bucket_*.json")):
             try:
                 mtime  = os.path.getmtime(json_file)
@@ -868,33 +905,55 @@ class MemoryWorker:
                         f"{bucket.lower()}."
                         f"{node_name.lower().replace(' ', '_')}"
                     )
-                    sql_value = (
-                        ", ".join(f"{k}: {v}" for k, v in attrs.items())
-                        if isinstance(attrs, dict) else str(attrs)
-                    )
-                    if not sql_value.strip():
+                    
+                    # OPTIMIZATION: Keep as a dictionary, or fallback to string.
+                    # Convert to strict JSON for the comparison check.
+                    if isinstance(attrs, dict):
+                        compare_value = json.dumps(attrs, sort_keys=True, ensure_ascii=False)
+                        db_payload = attrs # Pass the raw dict to the optimized DB
+                    else:
+                        compare_value = str(attrs)
+                        db_payload = str(attrs)
+
+                    if not compare_value.strip() or compare_value == "{}":
                         continue
 
-                    existing = self._get_sql_fact(sql_key)
-                    if existing and existing.lower().strip() == sql_value.lower().strip():
+                    # 🟢 FIX: Pass the user_name to check against their specific partition
+                    existing = self._get_sql_fact(user_name, sql_key)
+                    
+                    # Normalize existing DB string for comparison if it's JSON
+                    existing_compare = existing
+                    if existing and existing.startswith("{"):
+                        try:
+                            existing_dict = json.loads(existing)
+                            existing_compare = json.dumps(existing_dict, sort_keys=True, ensure_ascii=False)
+                        except:
+                            pass
+
+                    if existing_compare and existing_compare == compare_value:
                         continue
 
                     if not self._is_system_idle():
                         logger.info("🛑 User active — pausing sync.")
                         return synced
 
-                    if existing and existing.lower() != sql_value.lower():
+                    if existing_compare and existing_compare != compare_value:
                         narrative = self._biographer_resolve(
-                            sql_key, existing, sql_value, context)
+                            sql_key, existing, compare_value, context)
                         if narrative == "ABORTED":
                             return synced
                         self._write_narrative(bucket, sql_key, narrative, user_dir)
 
-                    vector = self._get_nomic_vector(f"{node_name}: {sql_value}")
+                    # Create vector based on a readable string, not raw JSON brackets
+                    flat_text_for_vector = ", ".join(f"{k}: {v}" for k, v in attrs.items()) if isinstance(attrs, dict) else str(attrs)
+                    vector = self._get_nomic_vector(f"{node_name}: {flat_text_for_vector}")
+                    
+                    # 🟢 FIX: Send the user_id to the database save function
                     self.db.save_core_fact(
+                        user_id=user_name,
                         bucket=bucket.replace(" ", "_"),
                         entity_key=sql_key,
-                        entity_value=sql_value,
+                        entity_value=db_payload, 
                         confidence=100,
                         vector=vector
                     )
@@ -906,6 +965,21 @@ class MemoryWorker:
                 logger.error(f"⚠️ Sync failed for {json_file}: {e}")
         return synced
 
+    # ----------------------------------------------------------
+    # HELPERS
+    # ----------------------------------------------------------
+    # 🟢 FIX: Update helper signature and SQL query to enforce user isolation
+    def _get_sql_fact(self, user_id: str, key: str):
+        try:
+            with self.db.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT entity_value FROM core_memory WHERE user_id=? AND entity_key=?",
+                    (user_id, key.lower(),))
+                row = cursor.fetchone()
+                return row[0] if row else None
+        except Exception:
+            return None
     # ----------------------------------------------------------
     # BIOGRAPHER — contradiction resolution only
     # ----------------------------------------------------------

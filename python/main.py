@@ -143,7 +143,7 @@ if __name__ == "__main__":
         # 🟢 NEW: Start Local Web Interface Server
         from services.web_api import get_web_server
         uvicorn_server, ws_manager = get_web_server(engine=engine, port=8000)
-        engine.register_web_manager(ws_manager)
+        #engine.register_web_manager(ws_manager)
         
         threading.Thread(target=cli_input_loop, args=(comms,), daemon=True).start()
     except Exception as e:

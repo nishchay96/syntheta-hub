@@ -36,7 +36,7 @@ var basePath string
 // Inside catalog.go
 func init() {
 	// Force the path to the one you confirmed with 'ls'
-	basePath = "/media/nishchay/Study/syntheta-hub/assets/fillers"
+	basePath = "../assets/fillers"
 	log.Printf("[FILLER] 📂 Asset Base Path LOCKED to: %s", basePath)
 }
 

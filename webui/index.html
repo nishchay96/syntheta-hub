@@ -10,20 +10,18 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
     <link rel="stylesheet" href="styles.css">
+    <script src="https://d3js.org/d3.v7.min.js"></script>
 </head>
 <body class="theme-dark">
 
-    <!-- Ambient Background -->
     <div class="bg-ambient">
         <div class="glow glow-blue"></div>
         <div class="glow glow-purple"></div>
         <div class="glow glow-teal"></div>
     </div>
 
-    <!-- App Shell -->
     <div class="app-shell">
 
-        <!-- ── TOP NAV ── -->
         <header class="top-nav" id="top-nav">
             <div class="nav-brand">
                 <div class="brand-icon">
@@ -41,6 +39,16 @@
             </div>
 
             <div class="nav-actions">
+                <select id="sat-selector" title="Select Hardware Target" style="background: var(--bg-surface); color: var(--text-primary); border: 1px solid var(--border); border-radius: 8px; padding: 6px 12px; cursor: pointer; margin-right: 8px; outline: none;">
+                    <option value="0">Sat 0 (Web Virtual)</option>
+                    <option value="1">Sat 1 (ESP32 Node)</option>
+                    <option value="2">Sat 2 (Expansion)</option>
+                </select>
+
+                <button id="btn-network" class="nav-btn" title="Living Memory Network">
+                    <i class="fa-solid fa-project-diagram"></i>
+                </button>
+
                 <button id="btn-health" class="nav-btn" title="System Health">
                     <i class="fa-solid fa-heart-pulse"></i>
                 </button>
@@ -50,23 +58,18 @@
             </div>
         </header>
 
-        <!-- ── MAIN CONTENT ── -->
         <main class="main-content">
 
-            <!-- ORB VIEW -->
             <section class="view-section" id="view-orb">
                 <div class="orb-wrapper">
                     <div class="orb" id="syntheta-orb">
-                        <div class="orb-fluid orb-fluid-1"></div>
-                        <div class="orb-fluid orb-fluid-2"></div>
-                        <div class="orb-fluid orb-fluid-3"></div>
+                        <canvas id="glcanvas"></canvas>
                     </div>
                     <p class="orb-label" id="orb-label">IDLE</p>
                     <p class="orb-sublabel" id="orb-sublabel">Awaiting connection to engine...</p>
                 </div>
             </section>
 
-            <!-- CHAT VIEW -->
             <section class="view-section hidden" id="view-chat">
                 <div class="chat-history" id="chat-history">
                     <div class="chat-msg system">
@@ -78,10 +81,8 @@
 
         </main>
 
-        <!-- ── BOTTOM BAR ── -->
         <footer class="bottom-bar">
 
-            <!-- Chat input (shown in chat mode) -->
             <div class="chat-input-row hidden" id="chat-input-area">
                 <input type="text" id="chat-input" placeholder="Ask Syntheta anything..." autocomplete="off" spellcheck="false">
                 <button id="btn-send" class="send-btn" title="Send">
@@ -89,13 +90,12 @@
                 </button>
             </div>
 
-            <!-- Control Pills -->
             <div class="control-pills">
                 <button id="btn-terminal" class="pill" title="Toggle Terminal Log">
                     <i class="fa-solid fa-terminal"></i>
                     <span>Terminal</span>
                 </button>
-                <button id="btn-chat-toggle" class="pill pill-active" title="Toggle Chat Mode">
+                <button id="btn-chat-toggle" class="pill" title="Toggle Chat Mode">
                     <i class="fa-regular fa-keyboard"></i>
                     <span>Chat</span>
                 </button>
@@ -104,7 +104,6 @@
 
     </div>
 
-    <!-- ── TERMINAL DRAWER ── -->
     <div class="terminal-drawer" id="terminal-drawer">
         <div class="terminal-header">
             <div class="terminal-title">
@@ -120,7 +119,6 @@
         </div>
     </div>
 
-    <!-- ── HEALTH OVERLAY ── -->
     <div class="modal-overlay hidden" id="overlay-health">
         <div class="modal-card" id="health-card">
             <div class="modal-header">
@@ -155,6 +153,44 @@
             </div>
         </div>
     </div>
+
+    <div class="network-drawer" id="network-drawer">
+        <div class="network-header">
+            <div class="terminal-title">
+                <i class="fa-solid fa-brain"></i>
+                <span id="network-title">Memory Matrix</span>
+            </div>
+            <div class="net-info">
+                <span class="net-info-label">NODE SELECTED:</span>
+                <span id="selected-node-display">— NULL —</span>
+            </div>
+            <button id="close-network" class="drawer-close">
+                <i class="fa-solid fa-xmark"></i>
+            </button>
+        </div>
+        <div class="network-body">
+            <canvas id="networkCanvas"></canvas>
+            <div id="net-node-data" class="node-data-overlay hidden">
+                <div class="node-data-header">NODE DATA</div>
+                <div class="node-data-content" id="node-data-content"></div>
+            </div>
+            <div class="network-footer-note">✧ THE NETWORK BREATHES · DRAG A NODE ✧</div>
+        </div>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const params = new URLSearchParams(window.location.search);
+            const currentSat = params.get('sat_id') || '0';
+            const selector = document.getElementById('sat-selector');
+            if(selector) {
+                selector.value = currentSat;
+                selector.addEventListener('change', (e) => {
+                    window.location.search = '?sat_id=' + e.target.value;
+                });
+            }
+        });
+    </script>
 
     <script src="app.js"></script>
 </body>

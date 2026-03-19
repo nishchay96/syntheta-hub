@@ -1,11 +1,16 @@
 /* ============================================================
    SYNTHETA OMEGA V3 — Frontend JavaScript
-   Handles: WebSocket, Orb states, Chat, Terminal, Health
+   Handles: WebSocket, WebGL Orb, Chat, Terminal, Health, Network Matrix
    ============================================================ */
 
 // ── CONSTANTS ────────────────────────────────────────────
-const WS_URL = `ws://${window.location.host}/ws/sat_0`;
-const VITALS_INTERVAL_MS = 5000; // Poll health every 5s
+const urlParams = new URLSearchParams(window.location.search);
+const activeSatId = urlParams.get('sat_id') || '0'; 
+const API_PORT = 8001; 
+
+const hostname = window.location.hostname || 'localhost';
+const WS_URL = `ws://${hostname}:${API_PORT}/ws/sat_${activeSatId}`;
+const VITALS_INTERVAL_MS = 5000;
 
 // ── STATE ────────────────────────────────────────────────
 let ws = null;
@@ -17,6 +22,7 @@ let reconnectTimer = null;
 const $ = (id) => document.getElementById(id);
 
 const orb           = $('syntheta-orb');
+const glcanvas      = $('glcanvas');
 const orbLabel      = $('orb-label');
 const orbSublabel   = $('orb-sublabel');
 const viewOrb       = $('view-orb');
@@ -29,6 +35,7 @@ const btnChatToggle = $('btn-chat-toggle');
 const btnTerminal   = $('btn-terminal');
 const btnHealth     = $('btn-health');
 const btnTheme      = $('btn-theme');
+const btnNetwork    = $('btn-network');
 const connDot       = $('conn-dot');
 const connLabel     = $('conn-label');
 const termDrawer    = $('terminal-drawer');
@@ -36,6 +43,10 @@ const termLogs      = $('terminal-logs');
 const closeTerminal = $('close-terminal');
 const overlayHealth = $('overlay-health');
 const closeHealth   = $('close-health');
+const netDrawer     = $('network-drawer');
+const closeNet      = $('close-network');
+const netCanvas     = $('networkCanvas');
+const netTitle      = $('network-title');
 
 // ── WEBSOCKET ────────────────────────────────────────────
 function connect() {
@@ -47,7 +58,7 @@ function connect() {
   ws.onopen = () => {
     clearTimeout(reconnectTimer);
     updateConnectionStatus('online');
-    logToTerminal('WebSocket connected to Syntheta Engine.', 'success');
+    logToTerminal(`WebSocket connected to Syntheta Engine (Sat ${activeSatId}).`, 'success');
     setOrbState('idle', 'READY', 'Engine connected — awaiting input.');
   };
 
@@ -72,6 +83,10 @@ function connect() {
 
 function handleServerMessage(data) {
   switch (data.type) {
+    case 'stt_transcription':
+      appendChatMessage(data.content, 'user');
+      break;
+
     case 'engine_state':
       handleEngineState(data.state);
       break;
@@ -79,7 +94,6 @@ function handleServerMessage(data) {
     case 'syntheta_response':
       appendChatMessage(data.content, 'system');
       setOrbState('speaking', 'SPEAKING', formatEllipsis(data.content, 60));
-      // Reset to idle after a speech animation window
       setTimeout(() => {
         if (currentOrbState === 'speaking') {
           setOrbState('idle', 'READY', 'Engine connected — awaiting input.');
@@ -94,6 +108,25 @@ function handleServerMessage(data) {
     case 'vitals_update':
       updateVitals(data);
       break;
+      
+    case 'profile_loaded':
+      if (window.networkVisualizer) {
+          // 🟢 FIX: Extract the payload from the content wrapper
+          const payload = data.content; 
+          netTitle.textContent = `${payload.user.toUpperCase()} MATRIX`;
+          btnNetwork.classList.remove('glow-once');
+          void btnNetwork.offsetWidth; // trigger reflow to restart animation
+          btnNetwork.classList.add('glow-once');
+          window.networkVisualizer.loadProfile(payload.user, payload.data);
+          
+          // 🔵 AUTO-OPEN: Show the network drawer immediately on load
+          netDrawer.classList.add('open');
+          window.networkVisualizer.start();
+      }
+      break;
+
+    default:
+      console.log('Unknown event type:', data.type);
   }
 }
 
@@ -114,50 +147,6 @@ function handleEngineState(state) {
   }
 }
 
-// ── AUDIO RHYTHM SIMULATOR ───────────────────────────────
-let animationFrameId = null;
-let currentVolume = 0;
-let targetVolume = 0;
-
-function startVibration() {
-  if (animationFrameId) return;
-  
-  const tick = () => {
-    if (currentOrbState !== 'speaking') {
-      orb.style.transform = '';
-      orb.style.boxShadow = '';
-      animationFrameId = null;
-      return;
-    }
-    
-    // Smoothly interpolate to target volume
-    currentVolume += (targetVolume - currentVolume) * 0.15;
-    
-    // Randomly change target to simulate vocal syllables and pauses
-    if (Math.random() < 0.12) {
-      targetVolume = Math.random() * 0.8 + 0.2; // Syllable burst
-    } else if (Math.random() < 0.05) {
-      targetVolume = 0; // Micro-pause
-    }
-    
-    // Apply scaling and slight chaotic translation for realism
-    const scale = 1.05 + (currentVolume * 0.09); 
-    const x = (Math.random() - 0.5) * currentVolume * 5;
-    const y = (Math.random() - 0.5) * currentVolume * 5;
-    
-    orb.style.transform = `scale(${scale}) translate(${x}px, ${y}px) translateZ(0)`;
-    
-    // Pulse the neon glow
-    const shadowSize = 30 + currentVolume * 50;
-    const shadowAlpha = 0.3 + currentVolume * 0.5;
-    orb.style.boxShadow = `0 0 ${shadowSize}px rgba(52,217,154,${shadowAlpha})`;
-
-    animationFrameId = requestAnimationFrame(tick);
-  };
-  
-  tick();
-}
-
 // ── ORB STATE ────────────────────────────────────────────
 function setOrbState(state, label, sublabel = '') {
   currentOrbState = state;
@@ -165,12 +154,11 @@ function setOrbState(state, label, sublabel = '') {
   orbLabel.textContent = label;
   orbSublabel.textContent = sublabel;
   
-  if (state === 'speaking') {
-    startVibration();
+  // Directly control the WebGL multiplier instead of CSS vibration
+  if (state === 'speaking' || state === 'processing' || state === 'web_search') {
+      targetSpeedMultiplier = 3.5;
   } else {
-    // Clean up inline styles when leaving speaking mode
-    orb.style.transform = '';
-    orb.style.boxShadow = '';
+      targetSpeedMultiplier = 1.0;
   }
 }
 
@@ -209,7 +197,11 @@ function submitMessage() {
   chatInput.value = '';
   setOrbState('processing', 'ROUTING', 'Analysing your input...');
 
-  ws.send(JSON.stringify({ type: 'user_input', content: text }));
+  ws.send(JSON.stringify({ 
+      type: 'user_input', 
+      sat_id: activeSatId,
+      content: text 
+  }));
 }
 
 // ── TERMINAL ─────────────────────────────────────────────
@@ -221,7 +213,6 @@ function logToTerminal(message, type = 'info') {
   termLogs.appendChild(line);
   termLogs.scrollTop = termLogs.scrollHeight;
 
-  // Trim logs so they don't grow unbounded
   while (termLogs.children.length > 200) {
     termLogs.removeChild(termLogs.firstChild);
   }
@@ -253,14 +244,13 @@ function updateVitals(data) {
   }
 }
 
-// Poll RAM/VRAM via HTTP API for actual live data
 async function pollVitals() {
   try {
-    const res = await fetch('/api/vitals');
+    const res = await fetch(`http://${hostname}:${API_PORT}/api/vitals`);
     if (!res.ok) return;
     const data = await res.json();
     updateVitals(data);
-  } catch { /* server may not expose this yet */ }
+  } catch { }
 }
 
 // ── CONNECTION STATUS ─────────────────────────────────────
@@ -268,7 +258,7 @@ function updateConnectionStatus(state) {
   connDot.className = 'status-dot';
   if (state === 'online') {
     connDot.classList.add('online');
-    connLabel.textContent = 'Engine Online';
+    connLabel.textContent = `Online (Sat ${activeSatId})`;
   } else if (state === 'offline') {
     connDot.classList.add('error');
     connLabel.textContent = 'Offline';
@@ -278,8 +268,6 @@ function updateConnectionStatus(state) {
 }
 
 // ── UI INTERACTIONS ───────────────────────────────────────
-
-// Theme Toggle
 btnTheme.addEventListener('click', () => {
   const isLight = document.body.classList.toggle('theme-light');
   document.body.classList.toggle('theme-dark', !isLight);
@@ -288,7 +276,6 @@ btnTheme.addEventListener('click', () => {
     : '<i class="fa-solid fa-moon"></i>';
 });
 
-// Chat Mode Toggle (switch between Orb view and Chat view)
 btnChatToggle.addEventListener('click', () => {
   isChatMode = !isChatMode;
 
@@ -308,32 +295,20 @@ btnChatToggle.addEventListener('click', () => {
   }
 });
 
-// Terminal Drawer
 btnTerminal.addEventListener('click', () => {
   termDrawer.classList.add('open');
   termLogs.scrollTop = termLogs.scrollHeight;
 });
-closeTerminal.addEventListener('click', () => {
-  termDrawer.classList.remove('open');
-});
-// Close terminal on backdrop click
-termDrawer.addEventListener('click', (e) => {
-  if (e.target === termDrawer) termDrawer.classList.remove('open');
-});
+closeTerminal.addEventListener('click', () => { termDrawer.classList.remove('open'); });
+termDrawer.addEventListener('click', (e) => { if (e.target === termDrawer) termDrawer.classList.remove('open'); });
 
-// Health Overlay
 btnHealth.addEventListener('click', () => {
   overlayHealth.classList.remove('hidden');
   pollVitals();
 });
-closeHealth.addEventListener('click', () => {
-  overlayHealth.classList.add('hidden');
-});
-overlayHealth.addEventListener('click', (e) => {
-  if (e.target === overlayHealth) overlayHealth.classList.add('hidden');
-});
+closeHealth.addEventListener('click', () => { overlayHealth.classList.add('hidden'); });
+overlayHealth.addEventListener('click', (e) => { if (e.target === overlayHealth) overlayHealth.classList.add('hidden'); });
 
-// Chat Send
 btnSend.addEventListener('click', submitMessage);
 chatInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) {
@@ -342,10 +317,581 @@ chatInput.addEventListener('keydown', (e) => {
   }
 });
 
-// ── HELPERS ───────────────────────────────────────────────
 function formatEllipsis(text, maxLen) {
   return text.length > maxLen ? text.slice(0, maxLen).trimEnd() + '…' : text;
 }
+
+
+// ── WEBGL ORB LOGIC (OCEAN WAVES) ────────────────────────
+const gl = glcanvas ? glcanvas.getContext('webgl', { alpha: true, premultipliedAlpha: false }) : null;
+
+let targetSpeedMultiplier = 1.0;
+let baseTime = 0;
+let previousTime = 0;
+let currentThinkingMult = 1.0;
+let programInfo;
+let positionBuffer;
+let shaderProgram;
+
+if (gl) {
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+    const vsSource = `
+        attribute vec4 aVertexPosition;
+        void main() { gl_Position = aVertexPosition; }
+    `;
+
+    const fsSource = `
+        precision highp float;
+        uniform vec2 u_resolution;
+        uniform float u_time;
+        uniform float u_thinking;
+
+        vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+        vec4 mod289(vec4 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+        vec4 permute(vec4 x) { return mod289(((x*34.0)+1.0)*x); }
+        vec4 taylorInvSqrt(vec4 r) { return 1.79284291400159 - 0.85373472095314 * r; }
+
+        float snoise(vec3 v) {
+            const vec2  C = vec2(1.0/6.0, 1.0/3.0) ;
+            const vec4  D = vec4(0.0, 0.5, 1.0, 2.0);
+            vec3 i  = floor(v + dot(v, C.yyy) );
+            vec3 x0 = v - i + dot(i, C.xxx) ;
+            vec3 g = step(x0.yzx, x0.xyz);
+            vec3 l = 1.0 - g;
+            vec3 i1 = min( g.xyz, l.zxy );
+            vec3 i2 = max( g.xyz, l.zxy );
+            vec3 x1 = x0 - i1 + C.xxx;
+            vec3 x2 = x0 - i2 + C.yyy;
+            vec3 x3 = x0 - D.yyy;
+            i = mod289(i);
+            vec4 p = permute( permute( permute( i.z + vec4(0.0, i1.z, i2.z, 1.0 )) + i.y + vec4(0.0, i1.y, i2.y, 1.0 )) + i.x + vec4(0.0, i1.x, i2.x, 1.0 ));
+            float n_ = 0.142857142857;
+            vec3  ns = n_ * D.wyz - D.xzx;
+            vec4 j = p - 49.0 * floor(p * ns.z * ns.z);
+            vec4 x_ = floor(j * ns.z);
+            vec4 y_ = floor(j - 7.0 * x_ );
+            vec4 x = x_ *ns.x + ns.yyyy;
+            vec4 y = y_ *ns.x + ns.yyyy;
+            vec4 h = 1.0 - abs(x) - abs(y);
+            vec4 b0 = vec4( x.xy, y.xy );
+            vec4 b1 = vec4( x.zw, y.zw );
+            vec4 s0 = floor(b0)*2.0 + 1.0;
+            vec4 s1 = floor(b1)*2.0 + 1.0;
+            vec4 sh = -step(h, vec4(0.0));
+            vec4 a0 = b0.xzyw + s0.xzyw*sh.xxyy ;
+            vec4 a1 = b1.xzyw + s1.xzyw*sh.zzww ;
+            vec3 p0 = vec3(a0.xy,h.x);
+            vec3 p1 = vec3(a0.zw,h.y);
+            vec3 p2 = vec3(a1.xy,h.z);
+            vec3 p3 = vec3(a1.zw,h.w);
+            vec4 norm = taylorInvSqrt(vec4(dot(p0,p0), dot(p1,p1), dot(p2, p2), dot(p3,p3)));
+            p0 *= norm.x; p1 *= norm.y; p2 *= norm.z; p3 *= norm.w;
+            vec4 m = max(0.5 - vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
+            m = m * m;
+            return 42.0 * dot( m*m, vec4( dot(p0,x0), dot(p1,x1), dot(p2,x2), dot(p3,x3) ) );
+        }
+
+        void main() {
+            vec2 center = 0.5 * u_resolution.xy;
+            float minRes = min(u_resolution.x, u_resolution.y);
+            float dist = length(gl_FragCoord.xy - center) / minRes;
+            
+            float pixel = 1.0 / minRes;
+            // "Thin and smooth" edges: 1.0 * pixel for a sharper but anti-aliased cutoff
+            float alpha = 1.0 - smoothstep(0.5 - 1.0 * pixel, 0.5, dist);
+            
+            if (alpha <= 0.0) { gl_FragColor = vec4(0.0); return; }
+
+            // Aspect-corrected coordinates for noise (st) and provided uv mapping
+            vec2 st = (gl_FragCoord.xy - center) / minRes;
+            vec2 uv = gl_FragCoord.xy / u_resolution.xy; 
+
+            float t = u_time * 0.2; 
+            float breath = sin(u_time * 1.5) * 0.5 + 0.5; 
+            float speedMix = mix(0.5, 1.8, breath) * u_thinking;
+
+            // Wind direction (from provided script)
+            float angle = snoise(vec3(0.0, 0.0, t * 0.5)) * 6.28318; 
+            vec2 windDir = vec2(cos(angle), sin(angle));
+            vec2 windScroll = windDir * t * speedMix * 0.75; 
+
+            // Edge bounce logic
+            float edge = smoothstep(0.3, 0.5, dist);
+            vec2 centerDir = normalize(vec2(0.5) - uv);
+            vec2 randBounce = vec2(
+                snoise(vec3(uv * 5.0, t * 4.0)), 
+                snoise(vec3(uv * 5.0 + 10.0, t * 4.0))
+            );
+            vec2 bounce = mix(centerDir, randBounce, 0.7) * edge * 0.4 * u_thinking;
+
+            // Fluid Coordinate Projection
+            vec3 p = vec3((uv * 2.0) - windScroll - bounce, t * speedMix);
+            vec2 distNoise = vec2(snoise(p), snoise(p + vec3(12.3, 4.5, 0.0)));
+            distNoise += 0.4 * vec2(
+                snoise(p * 2.2 + vec3(0.0, 0.0, t * 1.5)), 
+                snoise(p * 2.2 + vec3(5.1, 2.2, t * 1.5))
+            );
+
+            vec2 waveSt = uv + distNoise * 0.2; 
+            float diag = waveSt.x * 0.4 + waveSt.y * 0.6;
+
+            // --- FLUID ORB COLOR PALETTE ---
+            vec3 blue  = vec3(0.12, 0.52, 1.00);
+            vec3 cyan  = vec3(0.40, 0.85, 1.00);
+            vec3 white = mix(vec3(0.85, 0.95, 1.0), vec3(1.0), breath);
+            vec3 cream = vec3(0.99, 0.98, 0.94);
+
+            vec3 color = mix(blue, cyan, smoothstep(0.1, 0.6, diag));
+            color = mix(color, white, smoothstep(0.4, 0.9, diag));
+
+            float cloud = snoise(vec3(uv * 3.0 + distNoise - bounce, t * 2.0)) * 0.5 + 0.5;
+            float cloudMask = smoothstep(0.8, 0.1, diag);
+            color = mix(color, white, cloud * 0.5 * cloudMask);
+
+            float creamMask = smoothstep(0.6, 0.8, diag) * smoothstep(1.0, 0.8, diag);
+            color = mix(color, cream, creamMask * cloud * 0.6);
+
+            // --- REFINED THIN EDGE GLOW ---
+            float edgeGlow = smoothstep(0.46, 0.495, dist) * smoothstep(0.51, 0.49, dist);
+            color += vec3(0.6, 0.9, 1.0) * edgeGlow * (0.35 + breath * 0.15);
+            
+            float dither = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
+            color += (dither - 0.5) * 0.012;
+
+            gl_FragColor = vec4(color * alpha, alpha);
+        }
+    `;
+
+    function loadShader(gl, type, source) {
+        const shader = gl.createShader(type);
+        gl.shaderSource(shader, source);
+        gl.compileShader(shader);
+        return shader;
+    }
+
+    shaderProgram = gl.createProgram();
+    gl.attachShader(shaderProgram, loadShader(gl, gl.VERTEX_SHADER, vsSource));
+    gl.attachShader(shaderProgram, loadShader(gl, gl.FRAGMENT_SHADER, fsSource));
+    gl.linkProgram(shaderProgram);
+
+    programInfo = {
+        attribLocations: { vertexPosition: gl.getAttribLocation(shaderProgram, 'aVertexPosition') },
+        uniformLocations: {
+            resolution: gl.getUniformLocation(shaderProgram, 'u_resolution'),
+            time: gl.getUniformLocation(shaderProgram, 'u_time'),
+            thinking: gl.getUniformLocation(shaderProgram, 'u_thinking')
+        },
+    };
+
+    positionBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([1, 1, -1, 1, 1, -1, -1, -1]), gl.STATIC_DRAW);
+
+    function resizeGlCanvas() {
+        const dpr = window.devicePixelRatio || 1;
+        const displayWidth  = glcanvas.clientWidth;
+        const displayHeight = glcanvas.clientHeight;
+        if (glcanvas.width !== displayWidth * dpr || glcanvas.height !== displayHeight * dpr) {
+            glcanvas.width  = displayWidth * dpr;
+            glcanvas.height = displayHeight * dpr;
+        }
+    }
+
+    function renderGl(now) {
+        resizeGlCanvas();
+        if (previousTime === 0) previousTime = now;
+        const deltaTime = (now - previousTime) * 0.001;
+        previousTime = now;
+
+        currentThinkingMult += (targetSpeedMultiplier - currentThinkingMult) * 0.05;
+        baseTime += deltaTime;
+
+        gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
+        gl.clearColor(0.0, 0.0, 0.0, 0.0); 
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.useProgram(shaderProgram);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+        gl.vertexAttribPointer(programInfo.attribLocations.vertexPosition, 2, gl.FLOAT, false, 0, 0);
+        gl.enableVertexAttribArray(programInfo.attribLocations.vertexPosition);
+
+        gl.uniform2f(programInfo.uniformLocations.resolution, gl.canvas.width, gl.canvas.height);
+        gl.uniform1f(programInfo.uniformLocations.time, baseTime);
+        gl.uniform1f(programInfo.uniformLocations.thinking, currentThinkingMult);
+
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        requestAnimationFrame(renderGl);
+    }
+    requestAnimationFrame(renderGl);
+}
+
+
+// ── LIVING NETWORK D3 ADAPTER ──────────────────────────────
+class LivingNetwork {
+    constructor(canvas) {
+        this.canvas = canvas;
+        this.ctx = canvas.getContext('2d');
+        this.nodes = [];
+        this.links = [];
+        this.view = { offsetX: 0, offsetY: 0, scale: 1.0 };
+        this.animationId = null;
+        this.isRunning = false;
+        this.selectedNode = null;
+        this.selectedNodeDisplay = document.getElementById('selected-node-display');
+        this.nodeDataOverlay = document.getElementById('net-node-data');
+        this.nodeDataContent = document.getElementById('node-data-content');
+        
+        this.simulation = d3.forceSimulation(this.nodes)
+            .force('link', d3.forceLink(this.links).id(d => d.id).distance(120).strength(0.15))
+            .force('charge', d3.forceManyBody().strength(-300).theta(0.9))
+            .force('center', d3.forceCenter(0, 0))
+            .force('collision', d3.forceCollide().radius(d => d.size + 16).strength(0.8))
+            .alphaDecay(0.006)
+            .velocityDecay(0.15)
+            .alphaTarget(0.1);
+
+        this.simulation.force('breathing', (alpha) => {
+            const time = performance.now() * 0.001;
+            const globalBreath = Math.sin(time * 1.5);
+            for (let node of this.nodes) {
+                if (node.fx !== undefined || node.fy !== undefined) continue;
+                const dist = Math.hypot(node.x, node.y) || 1;
+                const dirX = node.x / dist;
+                const dirY = node.y / dist;
+                const localPhase = (node.x + node.y) * 0.005;
+                const localBreath = Math.sin(time * 1.5 + localPhase);
+                const strength = (globalBreath * 0.6 + localBreath * 0.4) * 0.25 * alpha;
+                node.vx += dirX * strength;
+                node.vy += dirY * strength;
+            }
+        });
+
+        this.bindEvents();
+    }
+
+    drawBackground() {
+        const w = this.canvas.width;
+        const h = this.canvas.height;
+        this.ctx.fillStyle = '#0a0f16';
+        this.ctx.fillRect(0, 0, w, h);
+
+        // Grid Lines
+        this.ctx.strokeStyle = '#2affb6';
+        this.ctx.lineWidth = 0.6;
+        this.ctx.globalAlpha = 0.08;
+        const step = 40;
+        
+        // Vertical lines with scroll offset
+        const offX = this.view.offsetX % step;
+        for (let i = offX; i < w; i += step) {
+            this.ctx.beginPath();
+            this.ctx.moveTo(i, 0);
+            this.ctx.lineTo(i, h);
+            this.ctx.stroke();
+        }
+        
+        this.ctx.strokeStyle = '#ff71ce';
+        const offY = this.view.offsetY % step;
+        for (let i = offY; i < h; i += step) {
+            this.ctx.beginPath();
+            this.ctx.moveTo(0, i);
+            this.ctx.lineTo(w, i);
+            this.ctx.stroke();
+        }
+        this.ctx.globalAlpha = 1.0;
+    }
+
+    getDescendantIds(rootNode) {
+        if (!rootNode) return new Set();
+        const ids = new Set([rootNode.id]);
+        const stack = [rootNode];
+        while (stack.length) {
+            const current = stack.pop();
+            this.links.forEach(link => {
+                const s = link.source;
+                const t = link.target;
+                if (s.id === current.id && !ids.has(t.id)) {
+                    ids.add(t.id);
+                    stack.push(t);
+                }
+            });
+        }
+        return ids;
+    }
+
+    loadProfile(username, memoryGraph) {
+        this.nodes.length = 0;
+        this.links.length = 0;
+        
+        const root = { id: username, label: username, type: 'main_dir', size: 32, color1: '#f000ff', color2: '#b000c0', x: 0, y: 0, birthTime: performance.now() };
+        this.nodes.push(root);
+
+        if(memoryGraph) {
+            Object.entries(memoryGraph).forEach(([bucketName, entities]) => {
+                const bucketId = `B_${bucketName}`;
+                const bucketNode = { id: bucketId, label: bucketName, type: 'bucket', size: 24, color1: '#ff2a6d', color2: '#d10079', x: (Math.random()-0.5)*100, y: (Math.random()-0.5)*100, birthTime: performance.now() };
+                this.nodes.push(bucketNode);
+                this.links.push({ source: username, target: bucketId });
+
+                if (Array.isArray(entities)) {
+                    entities.forEach(entity => {
+                        const entityId = `E_${bucketName}_${entity}`;
+                        const fileNode = { id: entityId, label: entity, type: 'key_value', size: 14, color1: '#05ffa1', color2: '#00c8ff', x: bucketNode.x + (Math.random()-0.5)*50, y: bucketNode.y + (Math.random()-0.5)*50, birthTime: performance.now() };
+                        this.nodes.push(fileNode);
+                        this.links.push({ source: bucketId, target: entityId });
+                    });
+                }
+            });
+        }
+
+        this.simulation.nodes(this.nodes);
+        this.simulation.force('link').links(this.links);
+        this.simulation.alpha(1).restart();
+    }
+
+    start() {
+        console.log('LivingNetwork: starting animation');
+        if (this.isRunning) return;
+        this.isRunning = true;
+        // Small delay to allow drawer transition to provide dimensions
+        setTimeout(() => this.resize(), 50);
+        setTimeout(() => this.resize(), 300); // And once more after transition
+        this.simulation.restart();
+        this.draw();
+    }
+
+    stop() {
+        console.log('LivingNetwork: stopping animation');
+        this.isRunning = false;
+        this.simulation.stop();
+        if (this.animationId) cancelAnimationFrame(this.animationId);
+    }
+
+    resize() {
+        const parent = this.canvas.parentElement;
+        if (!parent) return;
+        const rect = parent.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+            this.canvas.width = rect.width;
+            this.canvas.height = rect.height;
+            if (this.view.offsetX === 0) {
+                this.view.offsetX = rect.width / 2;
+                this.view.offsetY = rect.height / 2;
+            }
+            console.log(`LivingNetwork: Resized to ${rect.width}x${rect.height}`);
+        }
+    }
+
+    draw() {
+        if (!this.isRunning) return;
+        
+        if (this.canvas.width === 0 || this.canvas.height === 0) {
+            this.resize();
+        }
+        
+        const w = this.canvas.width;
+        const h = this.canvas.height;
+        const now = performance.now();
+        const timeSec = now * 0.001;
+
+        if (w === 0 || h === 0) {
+            this.animationId = requestAnimationFrame(() => this.draw());
+            return;
+        }
+
+        this.drawBackground();
+
+        // Subtree highlighting
+        const descendantIds = (this.selectedNode && this.selectedNode.type === 'bucket') 
+            ? this.getDescendantIds(this.selectedNode) 
+            : new Set();
+
+        this.ctx.save();
+        this.ctx.translate(this.view.offsetX, this.view.offsetY);
+        this.ctx.scale(this.view.scale, this.view.scale);
+
+        // ---- LINKS ----
+        this.links.forEach(link => {
+            const s = link.source, t = link.target;
+            if (!s || !t) return;
+            
+            const isHighlighted = descendantIds.has(t.id);
+            const dist = Math.hypot(t.x - s.x, t.y - s.y);
+            const perpX = -(t.y - s.y) / (dist || 1);
+            const perpY = (t.x - s.x) / (dist || 1);
+            const wiggle = Math.sin(timeSec * 1.8 + (s.x + t.y) * 0.05) * 20 * (dist / 150);
+            
+            this.ctx.beginPath();
+            this.ctx.moveTo(s.x, s.y);
+            const cpX = (s.x + t.x) / 2 + perpX * wiggle;
+            const cpY = (s.y + t.y) / 2 + perpY * wiggle;
+            this.ctx.quadraticCurveTo(cpX, cpY, t.x, t.y);
+            
+            const grad = this.ctx.createLinearGradient(s.x, s.y, t.x, t.y);
+            if (isHighlighted) {
+                grad.addColorStop(0, '#fff9b0'); grad.addColorStop(1, '#b0ffff');
+                this.ctx.shadowColor = '#fefe66';
+                this.ctx.shadowBlur = 30;
+                this.ctx.lineWidth = 4 / this.view.scale;
+            } else {
+                grad.addColorStop(0, '#0ff'); grad.addColorStop(1, '#f0f');
+                this.ctx.shadowColor = '#0ff';
+                this.ctx.shadowBlur = 12;
+                this.ctx.lineWidth = 1.8 / this.view.scale;
+            }
+            
+            this.ctx.strokeStyle = grad;
+            this.ctx.stroke();
+
+            // White hot core for highlighted
+            if (isHighlighted) {
+                this.ctx.strokeStyle = '#ffffffdd';
+                this.ctx.lineWidth = 1.2 / this.view.scale;
+                this.ctx.stroke();
+            }
+        });
+
+        // ---- NODES ----
+        this.nodes.forEach(node => {
+            const age = now - node.birthTime;
+            const tGrow = Math.min(1, age / 800);
+            const scale = (1 - Math.pow(1 - tGrow, 2));
+            const throb = 1.0 + 0.12 * Math.sin(timeSec * 3.0 + node.x * 0.05);
+            const r = node.size * scale * throb;
+
+            const grad = this.ctx.createRadialGradient(node.x-2, node.y-2, Math.max(0.1, r*0.2), node.x, node.y, Math.max(0.1, r*1.5));
+            grad.addColorStop(0, node.color1); grad.addColorStop(0.8, node.color2); grad.addColorStop(1, '#0a0f16');
+            
+            this.ctx.shadowColor = node.color1;
+            this.ctx.shadowBlur = (this.selectedNode === node) ? 35 : 18;
+            this.ctx.beginPath();
+            this.ctx.arc(node.x, node.y, Math.max(0, r), 0, 2 * Math.PI);
+            this.ctx.fillStyle = grad;
+            this.ctx.fill();
+
+            // Selected Ring
+            if (this.selectedNode === node) {
+                const sPulse = 1 + 0.1 * Math.sin(now * 0.01);
+                this.ctx.shadowBlur = 40;
+                this.ctx.shadowColor = '#ffffb0';
+                this.ctx.beginPath();
+                this.ctx.arc(node.x, node.y, Math.max(0, r * sPulse + 4), 0, 2 * Math.PI);
+                this.ctx.strokeStyle = '#fefe66';
+                this.ctx.lineWidth = 2.5 / this.view.scale;
+                this.ctx.stroke();
+            }
+
+            this.ctx.shadowBlur = 0;
+            this.ctx.fillStyle = (this.selectedNode === node) ? '#fff' : 'rgba(255,255,255,0.7)';
+            this.ctx.font = `${Math.max(10, 12/this.view.scale)}px "Inter", monospace`;
+            this.ctx.textAlign = 'center';
+            this.ctx.fillText(node.label, node.x, node.y + r + 18/this.view.scale);
+        });
+
+        this.ctx.restore();
+        this.animationId = requestAnimationFrame(() => this.draw());
+    }
+
+    updateUI() {
+        if (this.selectedNodeDisplay) {
+            if (this.selectedNode) {
+                const typeLabel = this.selectedNode.type.replace('_', ' ').toUpperCase();
+                this.selectedNodeDisplay.textContent = `[${typeLabel}] ${this.selectedNode.label}`;
+                
+                // Update Corner Info Overlay
+                if (this.nodeDataOverlay && this.nodeDataContent) {
+                    this.nodeDataContent.innerHTML = `
+                        <span class="node-data-type">${typeLabel}</span>
+                        <div class="node-data-label">${this.selectedNode.label}</div>
+                    `;
+                    this.nodeDataOverlay.classList.remove('hidden');
+                }
+            } else {
+                this.selectedNodeDisplay.textContent = '— NULL —';
+                if (this.nodeDataOverlay) {
+                    this.nodeDataOverlay.classList.add('hidden');
+                }
+            }
+        }
+    }
+
+    bindEvents() {
+        let isDragging = false, dragNode = null, isPanning = false, lastX, lastY;
+        
+        this.canvas.addEventListener('mousedown', (e) => {
+            const rect = this.canvas.getBoundingClientRect();
+            const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+            const wx = (mx - this.view.offsetX) / this.view.scale;
+            const wy = (my - this.view.offsetY) / this.view.scale;
+            
+            dragNode = this.nodes.find(n => Math.hypot(n.x - wx, n.y - wy) < (n.size * 1.5) / this.view.scale);
+            
+            if (dragNode) {
+                this.selectedNode = dragNode;
+                this.updateUI();
+                isDragging = true;
+                dragNode.fx = wx; dragNode.fy = wy;
+                this.simulation.alpha(0.5);
+            } else {
+                this.selectedNode = null;
+                this.updateUI();
+                isPanning = true; lastX = mx; lastY = my;
+            }
+        });
+        
+        this.canvas.addEventListener('mousemove', (e) => {
+            const rect = this.canvas.getBoundingClientRect();
+            const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+            if (isDragging) {
+                dragNode.fx = (mx - this.view.offsetX) / this.view.scale;
+                dragNode.fy = (my - this.view.offsetY) / this.view.scale;
+                this.simulation.alpha(0.2);
+            } else if (isPanning) {
+                this.view.offsetX += mx - lastX; this.view.offsetY += my - lastY;
+                lastX = mx; lastY = my;
+            }
+        });
+        
+        window.addEventListener('mouseup', () => {
+            if (isDragging) { dragNode.fx = null; dragNode.fy = null; isDragging = false; dragNode = null; }
+            isPanning = false;
+        });
+
+        this.canvas.addEventListener('wheel', (e) => {
+            e.preventDefault();
+            const rect = this.canvas.getBoundingClientRect();
+            const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+            const zoom = e.deltaY > 0 ? 0.9 : 1.1;
+            const newScale = Math.max(0.2, Math.min(8, this.view.scale * zoom));
+            
+            const wx = (mx - this.view.offsetX) / this.view.scale;
+            const wy = (my - this.view.offsetY) / this.view.scale;
+            
+            this.view.scale = newScale;
+            this.view.offsetX = mx - wx * this.view.scale;
+            this.view.offsetY = my - wy * this.view.scale;
+        }, { passive: false });
+    }
+}
+
+// ── UI WIRING ──────────────────────────────
+window.networkVisualizer = new LivingNetwork(netCanvas);
+
+btnNetwork.addEventListener('click', () => {
+    console.log('UI: Network button clicked');
+    if (!netDrawer) console.error('UI: netDrawer is NULL');
+    netDrawer.classList.add('open');
+    window.networkVisualizer.start();
+});
+
+closeNet.addEventListener('click', () => {
+    console.log('UI: Network close clicked');
+    netDrawer.classList.remove('open');
+    window.networkVisualizer.stop(); 
+});
+
 
 // ── INIT ──────────────────────────────────────────────────
 setOrbState('idle', 'OFFLINE', 'Connecting to engine...');

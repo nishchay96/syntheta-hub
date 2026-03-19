@@ -9,6 +9,7 @@ import json
 import wave
 import urllib.request
 from datetime import datetime
+import requests
 
 # ============================================
 # 🔧 SERVICE IMPORTS (ROBUST PATHING)
@@ -41,7 +42,7 @@ from .state_manager         import EngineState
 from .transcriber           import AudioTranscriber
 from .config                import *
 from .config                import ENABLE_LATENCY_TELEMETRY, KNOWLEDGE_VAULT_PATH
-from .communications        import HomeAssistantClient
+from .communications        import HomeAssistantClient, WebUIInjector
 from .audio_tools           import pad_audio_file
 from tts_engine             import TTSEngine
 from .memory_worker         import MemoryWorker
@@ -77,7 +78,7 @@ class SynthetaEngine:
         self.pi    = pi_manager
         self.comms = None
 
-        self.conversation_windows = {}   # {sat_id: [str, ...]}
+        self.conversation_windows = {}   
 
         self.db = DatabaseManager()
         self.ha = HomeAssistantClient(HA_TOKEN, HA_URL)
@@ -96,20 +97,15 @@ class SynthetaEngine:
             logger.warning(f"⚠️ TTS Disabled: {e}")
             self.tts = None
 
-        # ── NightWatchman + RealtimeCapture ───────────────────────────────
         self.nightwatchman = MemoryWorker(self.state)
         self.nightwatchman.start()
 
-        # ── LibrarianRouter ───────────────────────────────────────────────
         self.librarian = LibrarianRouter()
-
-        # 🟢 FIX 1: Wire vault path so router can load personal node anchors
         self.librarian.vault_path = self.nightwatchman.vault_path
-
-        # 🟢 FIX 2: Register router with capture layer so register_node()
-        # fires immediately when new bucket nodes are written — keeps
-        # personal anchors current without waiting for the 30s rescan
         self.nightwatchman.capture.router = self.librarian
+
+        self.web_injector = WebUIInjector(self)
+        self.web_injector.start()
 
         self.security_mode           = "NORMAL"
         self.sudo_timer              = 0
@@ -121,9 +117,6 @@ class SynthetaEngine:
         self.pending_force_listen    = {}
         self.is_thinking             = False
         
-        # 🟢 NEW: Web UI Manager
-        self.web_manager = None
-
         threading.Thread(target=self._processing_loop,     daemon=True).start()
         threading.Thread(target=self._monitor_loop,        daemon=True).start()
         threading.Thread(target=self._sudo_heartbeat_loop, daemon=True).start()
@@ -135,21 +128,21 @@ class SynthetaEngine:
         self.comms = comms_instance
         logger.info("🔗 Network Manager Registered.")
 
-    def register_web_manager(self, ws_manager):
-        """Bind the FastAPI WebSocket manager so the Engine can push updates to the UI."""
-        self.web_manager = ws_manager
-        logger.info("✅ Engine Registered Web UI Manager.")
-
-    def emit_to_webui(self, payload: dict):
-        if self.web_manager:
-            import asyncio
-            try:
-                # We spin up a tiny async task to push the broadcast
-                loop = asyncio.get_event_loop()
-                loop.create_task(self.web_manager.broadcast(payload))
-            except Exception as e:
-                logger.error(f"Failed to emit WS payload: {e}")
-
+    def emit_to_webui(self, sat_id, event_type, content):
+        try:
+            requests.post(
+                "http://127.0.0.1:8001/internal/broadcast",
+                json={
+                    "sat_id": str(sat_id),
+                    "event_type": event_type,
+                    "content": content 
+                },
+                # 🟢 FIX: Increased timeout from 0.2s to 1.0s to allow the matrix payload to pass
+                timeout=1.0 
+            )
+        except Exception as e:
+            # 🟢 FIX: Added temporary error logging so we don't fail silently
+            logger.error(f"⚠️ WebUI Broadcast Failed: {e}")    
     def _play_boot_sound(self):
         boot_wav = os.path.join(
             os.path.dirname(__file__), '../../assets/system/boot.wav')
@@ -157,7 +150,36 @@ class SynthetaEngine:
             self._speak_file(1, boot_wav)
 
     # =========================================
-    # NOMIC VECTOR (deep SQL retrieval)
+    # WEB UI MATRIX BROADCASTER
+    # =========================================
+    def _broadcast_memory_matrix(self, sat_id: int, username: str):
+        """Fetches SQL core memory and builds a graph for the D3.js UI."""
+        try:
+            raw_facts = self.db.get_all_core_facts(username)
+            memory_graph = {}
+            
+            for key, data in raw_facts.items():
+                bucket = data.get("bucket", "General")
+                # Convert "opinions.dark_chocolate" -> "Dark Chocolate"
+                entity_name = key.split(".")[-1].replace("_", " ").title()
+                
+                if bucket not in memory_graph:
+                    memory_graph[bucket] = []
+                if entity_name not in memory_graph[bucket]:
+                    memory_graph[bucket].append(entity_name)
+
+            # Broadcast the assembled graph
+            self.emit_to_webui(sat_id, "profile_loaded", {
+                "user": username,
+                "data": memory_graph
+            })
+            logger.info(f"🌐 Broadcasted Memory Matrix for '{username}' ({len(raw_facts)} nodes)")
+        except Exception as e:
+            logger.error(f"⚠️ Failed to broadcast memory matrix: {e}")
+
+
+    # =========================================
+    # NOMIC VECTOR
     # =========================================
     def _get_nomic_vector(self, text):
         try:
@@ -201,9 +223,10 @@ class SynthetaEngine:
         self.state.last_active_time[sat_id]  = time.time()
         self.state.session_mode[sat_id]      = "LISTENING"
 
-        # Set per-satellite vault so capture layer writes to correct directory
-        self.nightwatchman.capture.set_user(f"sat_{sat_id}", sat_id)
-
+        # 🟢 FIX: Initialize the NightWatchman vault to the currently active user
+        active_user = self.state.get_active_user(sat_id)
+        self.nightwatchman.capture.set_user(active_user, sat_id)
+        
         self.pi.start_new_session(sat_id)
 
     def on_calibration_update(self, sat_id, floor):
@@ -321,7 +344,6 @@ class SynthetaEngine:
         self.state.audio_buffers[sat_id] = b""
         if len(audio_data) < 3200:
             return
-        # 🟢 FIX 3: gatekeeper called with sat_id — enables per-room calibration
         if not self.gatekeeper.is_speech(sat_id, audio_data):
             self._close_session(sat_id)
             return
@@ -340,6 +362,7 @@ class SynthetaEngine:
 
             logger.info(f">>> 📝 INPUT: '{text}'")
             self.state.last_active_time[sat_id] = time.time()
+            self.emit_to_webui(sat_id, "stt_transcription", text)
 
             if self.security_mode == "SUDO_CHALLENGE":
                 if "sudo login" in text.lower():
@@ -368,22 +391,19 @@ class SynthetaEngine:
     }
 
     SPLIT_PATTERN = re.compile(
-        r',\s*and\s+'       # ", and "
-        r'|,\s*also\s+'     # ", also "
-        r'|,\s*then\s+'     # ", then "
-        r'|\band\s+also\s+' # "and also "
-        r'|\.\s+'           # ". " (sentence boundary)
-        r'|,\s*(?=[a-z])',  # ", <lowercase>" (clause boundary)
+        r',\s*and\s+'       
+        r'|,\s*also\s+'     
+        r'|,\s*then\s+'     
+        r'|\band\s+also\s+' 
+        r'|\.\s+'           
+        r'|,\s*(?=[a-z])',  
         re.IGNORECASE
     )
 
     def _split_compound_input(self, text):
-        """Splits compound commands into sub-commands using grammar patterns."""
-        # Don't split short inputs
         if len(text.split()) <= 5:
             return [text]
 
-        # Don't split if input contains protected compound phrases
         text_lower = text.lower()
         for phrase in self.COMPOUND_PROTECT:
             if phrase in text_lower:
@@ -395,11 +415,9 @@ class SynthetaEngine:
         return parts if parts else [text]
 
     def handle_input(self, sat_id, text, telemetry=None):
-        """Public entry point — splits compound commands, processes each."""
         sub_commands = self._split_compound_input(text)
 
         if len(sub_commands) <= 1:
-            # Single command — pass through directly
             self._handle_normal_command(sat_id, text, telemetry)
         else:
             logger.info(f"🔀 Compound split: {sub_commands}")
@@ -417,18 +435,40 @@ class SynthetaEngine:
             telemetry = {}
         current_session_id = self.state.session_start_time
 
-        # ── NLU ──────────────────────────────────────────────────────────
+        # 🟢 FIX 1: The Context-Aware Identity Intercept
+        clean_text = text.lower().strip()
+        id_match = re.match(r"^(i am|i'm|my name is|call me)\s+([a-zA-Z]+)", clean_text)
+        
+        # Check if the system literally just asked the user for their name
+        just_asked = False
+        if sat_id in self.state.identity_state:
+            just_asked = self.state.identity_state[sat_id].get("has_prompted", False)
+
+        new_name = None
+        if id_match:
+            new_name = id_match.group(2)
+        elif just_asked and len(clean_text.split()) <= 2:
+            # If they just say "Nishchay" or "Nishchay here" after being asked
+            new_name = clean_text.replace("here", "").strip().split()[0]
+            
+        if new_name and new_name.isalpha():
+            new_name = new_name.capitalize()
+            self.state.set_active_user(sat_id, new_name)
+            
+            # Immediately map vault to new user
+            self.nightwatchman.capture.set_user(new_name, sat_id)
+            self._broadcast_memory_matrix(sat_id, new_name)
+            self._speak(sat_id, f"Welcome, {new_name}. I have loaded your profile.", force_listen=False)
+            return
+
+        # 🟢 CRITICAL: The previously deleted Brain processing block
         brain_start = time.perf_counter()
         processed   = self.brain.process(text)
         telemetry["brain_lat_ms"] = round(
             (time.perf_counter() - brain_start) * 1000, 2)
 
-        # ── PiManager reflex path ─────────────────────────────────────────
         plan = self.pi.process_query(sat_id, text)
 
-        # Fallback: use SemanticBrain's strict alias match to build a plan
-        # This ensures fetch_date/fetch_time/stop work even when pi_manager
-        # is mocked (terminal mode) or returns nothing for system commands.
         if not plan and processed.get('intent') and isinstance(processed['intent'], dict):
             brain_intent = processed['intent']
             if brain_intent.get('intent') and brain_intent['intent'] != 'unknown':
@@ -439,6 +479,7 @@ class SynthetaEngine:
                     "raw_input": text,
                 }
 
+        # Reflex Execution (Bypasses Identity Tracking)
         if plan:
             plan["raw_input"] = text
             intent = plan.get("intent")
@@ -452,7 +493,6 @@ class SynthetaEngine:
         is_fresh_session       = not getattr(self.state, 'is_conversation', False)
         self.state.is_conversation = True
 
-        # ── Topic classification (Nomic, fast — for filler decision) ─────
         router_start           = time.perf_counter()
         current_topic, confidence = self.librarian.get_topic_with_score(text)
         telemetry["router_lat_ms"] = round(
@@ -464,41 +504,37 @@ class SynthetaEngine:
         if sat_id in self.state.cognitive:
             self.state.cognitive[sat_id]["topic"] = current_topic
 
-        # 🟢 NEW: Tell WebUI we are thinking
-        self.emit_to_webui({"type": "engine_state", "state": "processing"})
-
-        self.emitter.emit("start_thinking_audio", sat_id, {
-            "topic": current_topic, "play_filler": play_filler
-        })
+        self.emit_to_webui(sat_id, "engine_state", "processing")
+        
+        if str(sat_id) != "0":
+            self.emitter.emit("start_thinking_audio", sat_id, {
+                "topic": current_topic, "play_filler": play_filler
+            })
 
         self.is_thinking = True
         llm_start = time.perf_counter()
 
-        # ── Memory capture — background thread, never blocks ─────────────
-        # Writes JSON bucket files immediately + queues for NightWatchman
+        # 🟢 Retrieve active user FIRST, so DB and NightWatchman can use it
+        active_user = self.state.get_active_user(sat_id)
 
-        # ── Deep SQL memory (Nomic cosine) ────────────────────────────────
         q_vec = self._get_nomic_vector(text)
         sql_memory = ""
         if q_vec:
-            relevant = self.db.get_relevant_memories(q_vec, top_k=3)
+            relevant = self.db.get_relevant_memories(active_user, q_vec, top_k=3)
             sql_memory = "\n".join(relevant) if relevant else ""
 
-        # ── Live memory context from JSON bucket files (fast, no LLM) ────
-        # 🟢 FIX 4: use get_context_fast() — keyword scoring, zero LLM calls
-        # Safe in hot path. Falls back to empty string on first session.
-        memory_ctx = self.nightwatchman.capture.get_context(
-            sat_id, text, top_k=3)
+        # Point the working memory capture to the correct user vault
+        self.nightwatchman.capture.set_user(active_user, sat_id)
 
-        # ── Register user input in state BEFORE building the packet ───────
-        # This ensures the current user message appears in the LLM history.
+        memory_ctx = self.nightwatchman.capture.get_context(sat_id, text, top_k=3)
+
         self.state.update_context(sat_id, text, new_entities={})
 
         if is_silent:
             logger.info(f"🔕 Silent chunk saved to history: '{text}'")
             return
 
-        # ── Build GoldenPacket ────────────────────────────────────────────
+        # 🟢 Create the Golden Packet
         packet = self.state.build_golden_packet(
             sat_id,
             processed['input'],
@@ -506,15 +542,9 @@ class SynthetaEngine:
             memory_context=memory_ctx
         )
 
-        # ── Router enrichment (web search / routing decision) ─────────────
-        # enrich_packet() runs Nomic+mistral routing in parallel threads.
-        # Sets packet['route_taken'], packet['web_data'],
-        # packet['needs_memory'], packet['matched_memory_node']
         packet = self.librarian.enrich_packet(packet)
         resolved_input = packet.get('input', text)
 
-        # 🟢 FIX 5: Map web_data → memory_tank so llm_bridge prompt reads it
-        # memory_tank is the key the LLM system prompt reads for context
         if packet.get('web_data'):
             packet['memory_tank'] = packet['web_data']
         elif sql_memory:
@@ -522,13 +552,10 @@ class SynthetaEngine:
         elif not packet.get('memory_tank'):
             packet['memory_tank'] = ""
 
-        # ── History is managed by state_manager ────────────────────────────
-        # build_golden_packet() already includes the 1B summarizer's output
-        # for older turns + the raw recent buffer. Do NOT override here.
-
         print("\n" + "=" * 60)
         print("🔍 DEBUG: GOLDEN PACKET")
         print("-" * 60)
+        print(f"ACTIVE USER: {active_user}")
         print(f"ROUTE:       {packet.get('route_taken')}")
         print(f"MEMORY_CTX:\n{memory_ctx or '(empty)'}")
         print(f"MEMORY_TANK:\n{packet.get('memory_tank') or '(empty)'}")
@@ -551,12 +578,17 @@ class SynthetaEngine:
                 "response", "I'm not sure how to answer that.")
             active_subject = llm_response_dict.get("active_subject", "general")
 
+            # 🟢 FIX 3: The Deterministic Identity Nag
+            if packet.get("needs_identity_prompt") and active_user == "Guest":
+                logger.info(f"👤 Appending identity prompt deterministically for Guest [Sat {sat_id}].")
+                llm_response += " By the way, I don't believe we've been properly introduced. What should I call you?"
+                self.state.mark_identity_prompted(sat_id)
+
             telemetry["llm_lat_ms"] = round(
                 (time.perf_counter() - llm_start) * 1000, 2)
 
             self.state.commit_assistant_response(sat_id, llm_response, active_subject)
 
-            # ── Telemetry log ──────────────────────────────────────────────
             interaction_id = self.db.log_event(
                 resolved_query    = resolved_input,
                 topic_category    = current_topic,
@@ -564,26 +596,22 @@ class SynthetaEngine:
                 extracted_entities = processed.get('entities', {})
             )
 
-            # ── Queue full interaction for NightWatchman deep consolidation ─
-            task_id = self.db.create_memory_task(
-                {
-                    "user_query":     resolved_input,
-                    "llm_response":   llm_response,
-                    "topic":          current_topic,
-                    "active_subject": active_subject,
-                },
-                interaction_id=interaction_id
-            )
-            logger.info(f"💾 Interaction {interaction_id} → task {task_id}")
+            # 🟢 FIX 4: Database Shield — Never extract or save Guest memory
+            if active_user != "Guest":
+                task_id = self.db.create_memory_task(
+                    {
+                        "user_query":     resolved_input,
+                        "llm_response":   llm_response,
+                        "topic":          current_topic,
+                        "active_subject": active_subject,
+                        "sat_id":         sat_id  
+                    },
+                    interaction_id=interaction_id
+                )
+                logger.info(f"💾 Interaction {interaction_id} → task {task_id}")
+            else:
+                logger.info("👻 Guest active. Deep memory extraction skipped.")
 
-            # ── Update bucket files with complete pair (background) ────────
-            threading.Thread(
-                target=self.nightwatchman.capture.capture,
-                args=(sat_id, resolved_input, llm_response),
-                daemon=True
-            ).start()
-
-            # ── Respond ────────────────────────────────────────────────────
             if llm_response_dict.get("is_action"):
                 self._execute_plan(sat_id, {
                     "intent":    "LLM_ACTION",
@@ -715,11 +743,11 @@ class SynthetaEngine:
     # SPEECH OUTPUT
     # =========================================
     def _speak(self, sat_id, text, force_listen=False, telemetry=None):
-        if sat_id == 0:
-            # 🟢 NEW: Push text to Web UI instead of generating audio
-            self.emit_to_webui({"type": "syntheta_response", "content": text})
-            logger.info(f"🌐 [WebUI] SYNTHETA SAYS: {text}")
-            return
+        self.emit_to_webui(sat_id, "syntheta_response", text)
+        
+        if str(sat_id) == "0":
+            logger.info(f"🌐 [WebUI Virtual] SYNTHETA SAYS: {text}")
+            return 
             
         if self.tts:
             self._speak_direct(sat_id, text, force_listen, telemetry)

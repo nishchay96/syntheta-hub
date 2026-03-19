@@ -16,15 +16,15 @@ HUB_PY_DIR="$HUB_ROOT/python"
 HUB_PY_EXE=""
 
 find_python() {
-    # A. Check Audio Venv (Highest Priority - Contains CUDA/GPU libs)
-    if [ -x "$HUB_PY_DIR/audio/venv/bin/python" ]; then
-        echo "$HUB_PY_DIR/audio/venv/bin/python"
+    # A. Check Primary Venv (Root)
+    if [ -x "$HUB_ROOT/venv/bin/python" ]; then
+        echo "$HUB_ROOT/venv/bin/python"
         return
     fi
     
-    # B. Check General Venv
-    if [ -x "$HUB_PY_DIR/venv/bin/python" ]; then
-        echo "$HUB_PY_DIR/venv/bin/python"
+    # B. Check Audio Venv (Root)
+    if [ -x "$HUB_ROOT/venv-audio/bin/python" ]; then
+        echo "$HUB_ROOT/venv-audio/bin/python"
         return
     fi
     
