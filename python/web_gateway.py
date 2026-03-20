@@ -1,14 +1,22 @@
+import os
 import asyncio
 import logging
 import json
 import socket
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import HTMLResponse, FileResponse
 from pydantic import BaseModel
-from typing import Dict, List
+from typing import Dict, List, Any, Union
 
 logger = logging.getLogger("WebGateway")
 logging.basicConfig(level=logging.INFO)
+
+# Setup paths for hosting the web UI
+CURRENT_DIR   = os.path.dirname(os.path.abspath(__file__))
+HUB_ROOT      = os.path.dirname(CURRENT_DIR)
+WEBUI_DIR     = os.path.join(HUB_ROOT, "webui")
 
 app = FastAPI(title="Syntheta Omega Web Gateway")
 
@@ -58,7 +66,7 @@ manager = ConnectionManager()
 class BroadcastPayload(BaseModel):
     sat_id: str
     event_type: str
-    content: str
+    content: Any # Allow strings, dicts, or lists
 
 @app.post("/internal/broadcast")
 async def internal_broadcast(payload: BroadcastPayload):
@@ -98,7 +106,18 @@ async def websocket_endpoint(websocket: WebSocket, sat_id: str):
     except WebSocketDisconnect:
         manager.disconnect(websocket, sat_id)
 
+@app.get("/")
+async def get_root():
+    index_path = os.path.join(WEBUI_DIR, "index.html")
+    if os.path.exists(index_path):
+        return FileResponse(index_path)
+    return HTMLResponse(content="<h1>Syntheta UI Base</h1><p>index.html not found in webui/ folder.</p>")
+
 @app.get("/api/vitals")
 async def get_vitals():
     # Placeholder for the endpoint app.js is aggressively polling
     return {"status": "online", "cpu": 0, "memory": 0}
+
+# 🟢 Mount UI assets at the root (styles.css, app.js, etc.)
+if os.path.exists(WEBUI_DIR):
+    app.mount("/", StaticFiles(directory=WEBUI_DIR, html=True), name="ui")

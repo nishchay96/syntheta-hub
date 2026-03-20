@@ -227,6 +227,10 @@ class SynthetaEngine:
         active_user = self.state.get_active_user(sat_id)
         self.nightwatchman.capture.set_user(active_user, sat_id)
         
+        # 🟢 FIX: Automatically load the Memory Matrix if the user is already identified
+        if active_user and active_user != "Guest":
+            self._broadcast_memory_matrix(sat_id, active_user)
+            
         self.pi.start_new_session(sat_id)
 
     def on_calibration_update(self, sat_id, floor):
