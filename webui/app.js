@@ -111,15 +111,13 @@ function handleServerMessage(data) {
       
     case 'profile_loaded':
       if (window.networkVisualizer) {
-          // 🟢 FIX: Extract the payload from the content wrapper
           const payload = data.content; 
           netTitle.textContent = `${payload.user.toUpperCase()} MATRIX`;
           btnNetwork.classList.remove('glow-once');
-          void btnNetwork.offsetWidth; // trigger reflow to restart animation
+          void btnNetwork.offsetWidth; // trigger reflow
           btnNetwork.classList.add('glow-once');
           window.networkVisualizer.loadProfile(payload.user, payload.data);
           
-          // 🔵 AUTO-OPEN: Show the network drawer immediately on load
           netDrawer.classList.add('open');
           window.networkVisualizer.start();
       }
@@ -154,7 +152,6 @@ function setOrbState(state, label, sublabel = '') {
   orbLabel.textContent = label;
   orbSublabel.textContent = sublabel;
   
-  // Directly control the WebGL multiplier instead of CSS vibration
   if (state === 'speaking' || state === 'processing' || state === 'web_search') {
       targetSpeedMultiplier = 3.5;
   } else {
@@ -399,12 +396,10 @@ if (gl) {
             float dist = length(gl_FragCoord.xy - center) / minRes;
             
             float pixel = 1.0 / minRes;
-            // "Thin and smooth" edges: 1.0 * pixel for a sharper but anti-aliased cutoff
             float alpha = 1.0 - smoothstep(0.5 - 1.0 * pixel, 0.5, dist);
             
             if (alpha <= 0.0) { gl_FragColor = vec4(0.0); return; }
 
-            // Aspect-corrected coordinates for noise (st) and provided uv mapping
             vec2 st = (gl_FragCoord.xy - center) / minRes;
             vec2 uv = gl_FragCoord.xy / u_resolution.xy; 
 
@@ -412,12 +407,10 @@ if (gl) {
             float breath = sin(u_time * 1.5) * 0.5 + 0.5; 
             float speedMix = mix(0.5, 1.8, breath) * u_thinking;
 
-            // Wind direction (from provided script)
             float angle = snoise(vec3(0.0, 0.0, t * 0.5)) * 6.28318; 
             vec2 windDir = vec2(cos(angle), sin(angle));
             vec2 windScroll = windDir * t * speedMix * 0.75; 
 
-            // Edge bounce logic
             float edge = smoothstep(0.3, 0.5, dist);
             vec2 centerDir = normalize(vec2(0.5) - uv);
             vec2 randBounce = vec2(
@@ -426,7 +419,6 @@ if (gl) {
             );
             vec2 bounce = mix(centerDir, randBounce, 0.7) * edge * 0.4 * u_thinking;
 
-            // Fluid Coordinate Projection
             vec3 p = vec3((uv * 2.0) - windScroll - bounce, t * speedMix);
             vec2 distNoise = vec2(snoise(p), snoise(p + vec3(12.3, 4.5, 0.0)));
             distNoise += 0.4 * vec2(
@@ -437,7 +429,6 @@ if (gl) {
             vec2 waveSt = uv + distNoise * 0.2; 
             float diag = waveSt.x * 0.4 + waveSt.y * 0.6;
 
-            // --- FLUID ORB COLOR PALETTE ---
             vec3 blue  = vec3(0.12, 0.52, 1.00);
             vec3 cyan  = vec3(0.40, 0.85, 1.00);
             vec3 white = mix(vec3(0.85, 0.95, 1.0), vec3(1.0), breath);
@@ -453,7 +444,6 @@ if (gl) {
             float creamMask = smoothstep(0.6, 0.8, diag) * smoothstep(1.0, 0.8, diag);
             color = mix(color, cream, creamMask * cloud * 0.6);
 
-            // --- REFINED THIN EDGE GLOW ---
             float edgeGlow = smoothstep(0.46, 0.495, dist) * smoothstep(0.51, 0.49, dist);
             color += vec3(0.6, 0.9, 1.0) * edgeGlow * (0.35 + breath * 0.15);
             
@@ -543,30 +533,60 @@ class LivingNetwork {
         this.nodeDataOverlay = document.getElementById('net-node-data');
         this.nodeDataContent = document.getElementById('node-data-content');
         
+        // 🟢 FIX: Tie D3 Simulation to our custom manual render loop
+        if (typeof d3 === 'undefined') {
+            console.error("D3 library is not loaded. Ensure the script tag is present in index.html.");
+            return;
+        }
+
         this.simulation = d3.forceSimulation(this.nodes)
-            .force('link', d3.forceLink(this.links).id(d => d.id).distance(120).strength(0.15))
-            .force('charge', d3.forceManyBody().strength(-300).theta(0.9))
-            .force('center', d3.forceCenter(0, 0))
-            .force('collision', d3.forceCollide().radius(d => d.size + 16).strength(0.8))
-            .alphaDecay(0.006)
-            .velocityDecay(0.15)
-            .alphaTarget(0.1);
+            .force('link', d3.forceLink(this.links).id(d => d.id).distance(100).strength(0.25))
+            .force('charge', d3.forceManyBody().strength(-200).theta(0.9))
+            .force('center', d3.forceCenter(0, 0).strength(0.02))
+            .force('collision', d3.forceCollide().radius(d => d.size + 12).strength(0.9))
+            .alphaDecay(0.005)
+            .velocityDecay(0.2)
+            .alphaTarget(0.12)
+            .on('tick', () => {
+                // The math happens here, but we defer drawing to our requestAnimationFrame loop
+            });
 
         this.simulation.force('breathing', (alpha) => {
             const time = performance.now() * 0.001;
-            const globalBreath = Math.sin(time * 1.5);
+            // Slow, deep breath (≈ 8 second cycle)
+            const slowBreath = Math.sin(time * 0.8);
+            // Medium ripple (≈ 2 second)
+            const medBreath = Math.sin(time * 3.0);
+            // Fast flutter (≈ 0.5 second)
+            const fastFlutter = Math.sin(time * 12.0) * 0.3;
+
             for (let node of this.nodes) {
                 if (node.fx !== undefined || node.fy !== undefined) continue;
-                const dist = Math.hypot(node.x, node.y) || 1;
-                const dirX = node.x / dist;
-                const dirY = node.y / dist;
-                const localPhase = (node.x + node.y) * 0.005;
-                const localBreath = Math.sin(time * 1.5 + localPhase);
-                const strength = (globalBreath * 0.6 + localBreath * 0.4) * 0.25 * alpha;
+                
+                // Distance from center
+                const nx = node.x || 0;
+                const ny = node.y || 0;
+                const dist = Math.hypot(nx, ny) || 1;
+                const dirX = nx / dist;
+                const dirY = ny / dist;
+
+                // Local phase offset based on position (gives wave propagation)
+                const phase = nx * 0.02 + ny * 0.03;
+
+                // Combine rhythms with position-based phase
+                const breath = (slowBreath * 0.5 + medBreath * 0.3 + fastFlutter * 0.2) * 
+                               Math.sin(time * 2.0 + phase);
+
+                const strength = breath * 0.4 * alpha;
                 node.vx += dirX * strength;
                 node.vy += dirY * strength;
             }
         });
+
+        // Matrix Rain State
+        this.matrixChars = "01".split("");
+        this.matrixFontSize = 14;
+        this.matrixDrops = [];
 
         this.bindEvents();
     }
@@ -574,17 +594,24 @@ class LivingNetwork {
     drawBackground() {
         const w = this.canvas.width;
         const h = this.canvas.height;
+        this.ctx.clearRect(0, 0, w, h);
+        
+        // 1. Black base
         this.ctx.fillStyle = '#0a0f16';
         this.ctx.fillRect(0, 0, w, h);
 
-        // Grid Lines
+        // 2. Matrix Digital Rain (Subtle)
+        this.drawMatrixRain();
+
+        // 3. Cyberpunk Grid
+        this.ctx.save();
         this.ctx.strokeStyle = '#2affb6';
         this.ctx.lineWidth = 0.6;
         this.ctx.globalAlpha = 0.08;
         const step = 40;
-        
-        // Vertical lines with scroll offset
-        const offX = this.view.offsetX % step;
+        const offX = (this.view.offsetX * this.view.scale) % step;
+        const offY = (this.view.offsetY * this.view.scale) % step;
+
         for (let i = offX; i < w; i += step) {
             this.ctx.beginPath();
             this.ctx.moveTo(i, 0);
@@ -593,14 +620,66 @@ class LivingNetwork {
         }
         
         this.ctx.strokeStyle = '#ff71ce';
-        const offY = this.view.offsetY % step;
         for (let i = offY; i < h; i += step) {
             this.ctx.beginPath();
             this.ctx.moveTo(0, i);
             this.ctx.lineTo(w, i);
             this.ctx.stroke();
         }
-        this.ctx.globalAlpha = 1.0;
+        this.ctx.restore();
+    }
+
+    drawMatrixRain() {
+        const w = this.canvas.width;
+        const h = this.canvas.height;
+        const columns = Math.floor(w / this.matrixFontSize);
+
+        if (this.matrixDrops.length !== columns) {
+            this.matrixDrops = Array(columns).fill(1).map(() => Math.random() * h / this.matrixFontSize);
+        }
+
+        this.ctx.fillStyle = "#2affb615"; // Very faint green for characters
+        this.ctx.font = this.matrixFontSize + "px monospace";
+
+        for (let i = 0; i < this.matrixDrops.length; i++) {
+            const text = this.matrixChars[Math.floor(Math.random() * this.matrixChars.length)];
+            this.ctx.fillText(text, i * this.matrixFontSize, this.matrixDrops[i] * this.matrixFontSize);
+
+            if (this.matrixDrops[i] * this.matrixFontSize > h && Math.random() > 0.975) {
+                this.matrixDrops[i] = 0;
+            }
+            this.matrixDrops[i] += 0.5; // Slow drift
+        }
+    }
+
+    drawOrganicLine(s, t, time, isHighlighted) {
+        const sx = s.x || 0;
+        const sy = s.y || 0;
+        const tx = t.x || 0;
+        const ty = t.y || 0;
+
+        const midX = (sx + tx) / 2;
+        const midY = (sy + ty) / 2;
+        const dx = tx - sx;
+        const dy = ty - sy;
+        const dist = Math.hypot(dx, dy);
+        
+        // Perpendicular vector for curving
+        const perpX = -dy / (dist || 1);
+        const perpY = dx / (dist || 1);
+        
+        // Multi-frequency undulation: slow wave + fast flutter
+        const phase = (sx + ty) * 0.03 + time * 2.0;
+        const wiggle1 = Math.sin(phase) * 15;
+        const wiggle2 = Math.sin(phase * 2.5 + 1.2) * 8;
+        const wiggleIntensity = (wiggle1 + wiggle2) * (dist / 180);
+
+        const cpX = midX + perpX * wiggleIntensity;
+        const cpY = midY + perpY * wiggleIntensity;
+
+        this.ctx.beginPath();
+        this.ctx.moveTo(sx, sy);
+        this.ctx.quadraticCurveTo(cpX, cpY, tx, ty);
     }
 
     getDescendantIds(rootNode) {
@@ -655,9 +734,8 @@ class LivingNetwork {
         console.log('LivingNetwork: starting animation');
         if (this.isRunning) return;
         this.isRunning = true;
-        // Small delay to allow drawer transition to provide dimensions
         setTimeout(() => this.resize(), 50);
-        setTimeout(() => this.resize(), 300); // And once more after transition
+        setTimeout(() => this.resize(), 300);
         this.simulation.restart();
         this.draw();
     }
@@ -703,7 +781,6 @@ class LivingNetwork {
 
         this.drawBackground();
 
-        // Subtree highlighting
         const descendantIds = (this.selectedNode && this.selectedNode.type === 'bucket') 
             ? this.getDescendantIds(this.selectedNode) 
             : new Set();
@@ -712,74 +789,87 @@ class LivingNetwork {
         this.ctx.translate(this.view.offsetX, this.view.offsetY);
         this.ctx.scale(this.view.scale, this.view.scale);
 
-        // ---- LINKS ----
+        // ---- LINKS (Living Tendrils) ----
         this.links.forEach(link => {
             const s = link.source, t = link.target;
             if (!s || !t) return;
             
             const isHighlighted = descendantIds.has(t.id);
-            const dist = Math.hypot(t.x - s.x, t.y - s.y);
-            const perpX = -(t.y - s.y) / (dist || 1);
-            const perpY = (t.x - s.x) / (dist || 1);
-            const wiggle = Math.sin(timeSec * 1.8 + (s.x + t.y) * 0.05) * 20 * (dist / 150);
+            const sx = s.x || 0;
+            const sy = s.y || 0;
+            const tx = t.x || 0;
+            const ty = t.y || 0;
+
+            const gradient = this.ctx.createLinearGradient(sx, sy, tx, ty);
             
-            this.ctx.beginPath();
-            this.ctx.moveTo(s.x, s.y);
-            const cpX = (s.x + t.x) / 2 + perpX * wiggle;
-            const cpY = (s.y + t.y) / 2 + perpY * wiggle;
-            this.ctx.quadraticCurveTo(cpX, cpY, t.x, t.y);
-            
-            const grad = this.ctx.createLinearGradient(s.x, s.y, t.x, t.y);
             if (isHighlighted) {
-                grad.addColorStop(0, '#fff9b0'); grad.addColorStop(1, '#b0ffff');
+                gradient.addColorStop(0, '#fff9b0');
+                gradient.addColorStop(0.5, '#ffb3ff');
+                gradient.addColorStop(1, '#b0ffff');
+
                 this.ctx.shadowColor = '#fefe66';
-                this.ctx.shadowBlur = 30;
-                this.ctx.lineWidth = 4 / this.view.scale;
+                this.ctx.shadowBlur = 35;
+                this.ctx.lineWidth = 4.5 / this.view.scale;
             } else {
-                grad.addColorStop(0, '#0ff'); grad.addColorStop(1, '#f0f');
+                gradient.addColorStop(0, '#0ff');
+                gradient.addColorStop(0.5, '#f0f');
+                gradient.addColorStop(1, '#ff0');
+
                 this.ctx.shadowColor = '#0ff';
-                this.ctx.shadowBlur = 12;
-                this.ctx.lineWidth = 1.8 / this.view.scale;
+                this.ctx.shadowBlur = 14;
+                this.ctx.lineWidth = 2.2 / this.view.scale;
             }
             
-            this.ctx.strokeStyle = grad;
+            this.ctx.strokeStyle = gradient;
+            this.drawOrganicLine(s, t, timeSec, isHighlighted);
             this.ctx.stroke();
 
-            // White hot core for highlighted
-            if (isHighlighted) {
-                this.ctx.strokeStyle = '#ffffffdd';
-                this.ctx.lineWidth = 1.2 / this.view.scale;
-                this.ctx.stroke();
-            }
+            // Hot core
+            this.ctx.shadowBlur = isHighlighted ? 40 : 20;
+            this.ctx.lineWidth = (isHighlighted ? 1.8 : 0.8) / this.view.scale;
+            this.ctx.strokeStyle = isHighlighted ? '#ffffffdd' : '#ffffff60';
+            this.drawOrganicLine(s, t, timeSec, isHighlighted);
+            this.ctx.stroke();
         });
 
-        // ---- NODES ----
+        // ---- NODES (Pulsing Cells) ----
         this.nodes.forEach(node => {
-            const age = now - node.birthTime;
-            const tGrow = Math.min(1, age / 800);
-            const scale = (1 - Math.pow(1 - tGrow, 2));
-            const throb = 1.0 + 0.12 * Math.sin(timeSec * 3.0 + node.x * 0.05);
-            const r = node.size * scale * throb;
+            const age = now - (node.birthTime || 0);
+            let tGrow = Math.min(1, age / 800);
+            tGrow = 1 - Math.pow(1 - tGrow, 2); // Ease out
+            
+            const nx = node.x || 0;
+            const ny = node.y || 0;
 
-            const grad = this.ctx.createRadialGradient(node.x-2, node.y-2, Math.max(0.1, r*0.2), node.x, node.y, Math.max(0.1, r*1.5));
-            grad.addColorStop(0, node.color1); grad.addColorStop(0.8, node.color2); grad.addColorStop(1, '#0a0f16');
+            // Individual cell pulsation
+            const idNum = parseInt(node.id.replace(/\D/g, '')) || 1;
+            const pulsePhase = timeSec * 2.5 + idNum * 0.3;
+            const throb = 1.0 + 0.15 * (Math.sin(pulsePhase) * 0.7 + Math.sin(pulsePhase * 1.8) * 0.3);
+            
+            const scale = tGrow * throb;
+            const r = node.size * scale;
+
+            const grad = this.ctx.createRadialGradient(nx-2, ny-2, Math.max(0.1, r*0.2), nx, ny, Math.max(0.1, r*1.5));
+            grad.addColorStop(0, node.color1); 
+            grad.addColorStop(0.8, node.color2); 
+            grad.addColorStop(1, '#0a0f16');
             
             this.ctx.shadowColor = node.color1;
-            this.ctx.shadowBlur = (this.selectedNode === node) ? 35 : 18;
+            this.ctx.shadowBlur = (this.selectedNode === node) ? 40 : 28;
             this.ctx.beginPath();
-            this.ctx.arc(node.x, node.y, Math.max(0, r), 0, 2 * Math.PI);
+            this.ctx.arc(nx, ny, Math.max(0, r), 0, 2 * Math.PI);
             this.ctx.fillStyle = grad;
             this.ctx.fill();
 
-            // Selected Ring
+            // Selection indicator & labels
             if (this.selectedNode === node) {
                 const sPulse = 1 + 0.1 * Math.sin(now * 0.01);
-                this.ctx.shadowBlur = 40;
+                this.ctx.shadowBlur = 45;
                 this.ctx.shadowColor = '#ffffb0';
                 this.ctx.beginPath();
-                this.ctx.arc(node.x, node.y, Math.max(0, r * sPulse + 4), 0, 2 * Math.PI);
+                this.ctx.arc(nx, ny, Math.max(0, r * sPulse + 4), 0, 2 * Math.PI);
                 this.ctx.strokeStyle = '#fefe66';
-                this.ctx.lineWidth = 2.5 / this.view.scale;
+                this.ctx.lineWidth = 2.8 / this.view.scale;
                 this.ctx.stroke();
             }
 
@@ -787,7 +877,7 @@ class LivingNetwork {
             this.ctx.fillStyle = (this.selectedNode === node) ? '#fff' : 'rgba(255,255,255,0.7)';
             this.ctx.font = `${Math.max(10, 12/this.view.scale)}px "Inter", monospace`;
             this.ctx.textAlign = 'center';
-            this.ctx.fillText(node.label, node.x, node.y + r + 18/this.view.scale);
+            this.ctx.fillText(node.label, nx, ny + r + 18/this.view.scale);
         });
 
         this.ctx.restore();
@@ -800,7 +890,6 @@ class LivingNetwork {
                 const typeLabel = this.selectedNode.type.replace('_', ' ').toUpperCase();
                 this.selectedNodeDisplay.textContent = `[${typeLabel}] ${this.selectedNode.label}`;
                 
-                // Update Corner Info Overlay
                 if (this.nodeDataOverlay && this.nodeDataContent) {
                     this.nodeDataContent.innerHTML = `
                         <span class="node-data-type">${typeLabel}</span>
@@ -820,13 +909,14 @@ class LivingNetwork {
     bindEvents() {
         let isDragging = false, dragNode = null, isPanning = false, lastX, lastY;
         
+        // 🟢 FIX: Ensure we calculate coordinates accurately and don't overwrite undefined values
         this.canvas.addEventListener('mousedown', (e) => {
             const rect = this.canvas.getBoundingClientRect();
             const mx = e.clientX - rect.left, my = e.clientY - rect.top;
             const wx = (mx - this.view.offsetX) / this.view.scale;
             const wy = (my - this.view.offsetY) / this.view.scale;
             
-            dragNode = this.nodes.find(n => Math.hypot(n.x - wx, n.y - wy) < (n.size * 1.5) / this.view.scale);
+            dragNode = this.nodes.find(n => Math.hypot((n.x || 0) - wx, (n.y || 0) - wy) < (n.size * 1.5) / this.view.scale);
             
             if (dragNode) {
                 this.selectedNode = dragNode;
@@ -844,7 +934,7 @@ class LivingNetwork {
         this.canvas.addEventListener('mousemove', (e) => {
             const rect = this.canvas.getBoundingClientRect();
             const mx = e.clientX - rect.left, my = e.clientY - rect.top;
-            if (isDragging) {
+            if (isDragging && dragNode) {
                 dragNode.fx = (mx - this.view.offsetX) / this.view.scale;
                 dragNode.fy = (my - this.view.offsetY) / this.view.scale;
                 this.simulation.alpha(0.2);
@@ -855,7 +945,9 @@ class LivingNetwork {
         });
         
         window.addEventListener('mouseup', () => {
-            if (isDragging) { dragNode.fx = null; dragNode.fy = null; isDragging = false; dragNode = null; }
+            if (isDragging && dragNode) { dragNode.fx = null; dragNode.fy = null; }
+            isDragging = false; 
+            dragNode = null; 
             isPanning = false;
         });
 
@@ -877,21 +969,30 @@ class LivingNetwork {
 }
 
 // ── UI WIRING ──────────────────────────────
-window.networkVisualizer = new LivingNetwork(netCanvas);
+// Only initialize if the canvas exists to prevent errors on pages without it
+if (netCanvas) {
+    window.networkVisualizer = new LivingNetwork(netCanvas);
 
-btnNetwork.addEventListener('click', () => {
-    console.log('UI: Network button clicked');
-    if (!netDrawer) console.error('UI: netDrawer is NULL');
-    netDrawer.classList.add('open');
-    window.networkVisualizer.start();
-});
+    if (btnNetwork) {
+        btnNetwork.addEventListener('click', () => {
+            console.log('UI: Network button clicked');
+            if (netDrawer) {
+                netDrawer.classList.add('open');
+                window.networkVisualizer.start();
+            }
+        });
+    }
 
-closeNet.addEventListener('click', () => {
-    console.log('UI: Network close clicked');
-    netDrawer.classList.remove('open');
-    window.networkVisualizer.stop(); 
-});
-
+    if (closeNet) {
+        closeNet.addEventListener('click', () => {
+            console.log('UI: Network close clicked');
+            if (netDrawer) {
+                netDrawer.classList.remove('open');
+                window.networkVisualizer.stop(); 
+            }
+        });
+    }
+}
 
 // ── INIT ──────────────────────────────────────────────────
 setOrbState('idle', 'OFFLINE', 'Connecting to engine...');
