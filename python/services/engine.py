@@ -43,6 +43,7 @@ from .communications        import HomeAssistantClient, WebUIInjector
 from .audio_tools           import pad_audio_file
 from tts_engine             import TTSEngine
 from .memory_worker         import MemoryWorker
+from nlu.api_scout          import APIScout
 
 logger = logging.getLogger("SynthetaEngine")
 
@@ -99,6 +100,8 @@ class SynthetaEngine:
         self.librarian = LibrarianRouter()
         self.librarian.vault_path = self.nightwatchman.vault_path
         self.nightwatchman.capture.router = self.librarian
+        
+        self.api_scout = APIScout()
 
         self.web_injector = WebUIInjector(self)
         self.web_injector.start()
@@ -559,6 +562,31 @@ class SynthetaEngine:
                 self._speak(sat_id, f"I don't have a profile for {name} yet. Should I create one?")
             return
 
+        # --- NEW DECISION TREE (The "Doors") ---
+        # Door 1: Reflex Catalog (Handled above by pi.process_query)
+        
+        # We need the vector for both Hot Cache and standard pipeline
+        q_vec = self._get_nomic_vector(text)
+        
+        if q_vec is not None:
+            # Door 2: Hot Cache (Idle Librarian Data)
+            hot_match = self.db.get_hot_cache_match(q_vec, threshold=0.85)
+            if hot_match:
+                logger.info(f"⚡ FAST PATH: Hot Cache matched '{text}' < 50ms")
+                self._speak(sat_id, hot_match, force_listen=False, telemetry=telemetry)
+                return
+            
+            # Door 3: API Scout
+            api_start = time.perf_counter()
+            api_match = self.api_scout.lookup_api(text, query_vector=q_vec, threshold=0.85)
+            if api_match:
+                api_ms = (time.perf_counter() - api_start) * 1000
+                logger.info(f"⚡ FAST PATH: API Scout matched '{text}' in {api_ms:.1f}ms")
+                self._speak(sat_id, api_match, force_listen=False, telemetry=telemetry)
+                return
+                
+        # Door 4: Deep Web / General Routing (Proceeds Below)
+
         is_fresh_session       = not getattr(self.state, 'is_conversation', False)
         self.state.is_conversation = True
 
@@ -586,9 +614,8 @@ class SynthetaEngine:
         # 🟢 Retrieve active user FIRST, so DB and NightWatchman can use it
         active_user = self.state.get_active_user(sat_id)
 
-        q_vec = self._get_nomic_vector(text)
         sql_memory = ""
-        if q_vec:
+        if q_vec is not None:
             relevant = self.db.get_relevant_memories(active_user, q_vec, top_k=3)
             sql_memory = "\n".join(relevant) if relevant else ""
 
@@ -596,7 +623,7 @@ class SynthetaEngine:
         self.nightwatchman.capture.set_user(active_user, sat_id)
 
         # 🟢 CONSOLIDATED CONTEXT: Use build_context_string instead of capture.get_context
-        memory_ctx = self.assembler.build_context_string(text)
+        memory_ctx = self.assembler.build_context_string(active_user, text)
 
         self.state.update_context(sat_id, text, new_entities={})
 

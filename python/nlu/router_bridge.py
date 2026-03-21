@@ -114,6 +114,14 @@ class LibrarianRouter:
 
     def pre_load(self):
         """Warm up the routing model and pin it in VRAM on startup."""
+        try:
+            from nlu.llm_bridge import UI_MODEL
+            if ROUTER_MODEL == UI_MODEL:
+                logger.info(f"⏭️ Skipping {ROUTER_MODEL} (Router) pre-load (already handled by LLM).")
+                return
+        except ImportError:
+            pass
+            
         logger.info(f"🔥 Hot-loading {ROUTER_MODEL} (Router) into VRAM...")
         try:
             payload = {
@@ -336,15 +344,10 @@ class LibrarianRouter:
         used_llm = False
 
         if is_gray:
-            # Short queries are almost always general — skip expensive LLM routing
-            if len(query.split()) <= 6:
-                decision = "general"
-                logger.info(f"⚡ Gray zone short-circuit (≤6 words) → 'general'")
-            else:
-                # Gray zone — mistral decides
-                decision = self._mistral_routing_decision(query)
-                used_llm = True
-                logger.info(f"🤔 Gray zone → mistral: '{decision}'")
+            # Gray zone — mistral decides
+            decision = self._mistral_routing_decision(query)
+            used_llm = True
+            logger.info(f"🤔 Gray zone → mistral: '{decision}'")
         else:
             if is_web and is_personal:
                 decision = "both"
@@ -424,18 +427,26 @@ class LibrarianRouter:
         """
         # ── SearxNG fetch ─────────────────────────────────────
         results = self._fetch_searxng(query)
+        # ── SearxNG fetch ─────────────────────────────────────
+        results = self._fetch_searxng(query)
+        
+        if results is None:
+            # Fatal connection error — do not retry, jump straight to DDG
+            results = []
+        else:
+            # Fallback 1: drop time_range and retry
+            if not results:
+                logger.info(f"🌐 Retrying without time filter: {query}")
+                results = self._fetch_searxng(query, time_range=None)
+                if results is None: results = []
 
-        # Fallback 1: drop time_range and retry
-        if not results:
-            logger.info(f"🌐 Retrying without time filter: {query}")
-            results = self._fetch_searxng(query, time_range=None)
-
-        # Fallback 2: simplify query to first 3 words and retry
-        if not results:
-            simple_query = " ".join(query.split()[:3])
-            if simple_query != query:
-                logger.info(f"🌐 Retrying simplified: '{simple_query}'")
-                results = self._fetch_searxng(simple_query, time_range=None)
+            # Fallback 2: simplify query to first 3 words and retry
+            if not results:
+                simple_query = " ".join(query.split()[:3])
+                if simple_query != query:
+                    logger.info(f"🌐 Retrying simplified: '{simple_query}'")
+                    results = self._fetch_searxng(simple_query, time_range=None)
+                    if results is None: results = []
 
         if not results:
             logger.warning(f"🌐 All SearxNG attempts failed for: '{query}'")
@@ -511,57 +522,39 @@ class LibrarianRouter:
             res.raise_for_status()
             data = res.json()
             return data.get("results", [])
+        except requests.exceptions.ConnectionError as ce:
+            logger.warning(f"🌐 SearxNG is totally offline (ConnectionError): {ce}")
+            return None  # None indicates fatal network failure, skip retries
         except Exception as e:
             logger.warning(f"🌐 SearxNG request failed: {e}")
             return []
 
     def _fetch_duckduckgo(self, query: str) -> list:
         """
-        Fallback web search using DuckDuckGo Instant Answer API.
-        Free, no auth needed. Returns results in SearxNG-compatible format.
+        Fallback web search using duckduckgo_search Python module.
+        Pulls actual live HTML search results instead of static Instant Answer data.
         """
         try:
-            params = {
-                "q": query,
-                "format": "json",
-                "no_html": 1,
-                "skip_disambig": 1,
-            }
-            logger.info(f"🦆 DuckDuckGo fallback: '{query}'")
-            res = requests.get(
-                "https://api.duckduckgo.com/",
-                params=params,
-                timeout=5.0,
-                headers={"User-Agent": "SynthetaBot/1.0"}
-            )
-            data = res.json()
+            from duckduckgo_search import DDGS
+            logger.info(f"🦆 DuckDuckGo (DDGS) fallback: '{query}'")
             results = []
-
-            # Abstract (main answer)
-            if data.get("AbstractText"):
-                results.append({
-                    "title": data.get("Heading", query),
-                    "content": data["AbstractText"],
-                    "url": data.get("AbstractURL", ""),
-                })
-
-            # Related Topics
-            for topic in data.get("RelatedTopics", [])[:5]:
-                if isinstance(topic, dict) and topic.get("Text"):
+            with DDGS() as ddgs:
+                for r in ddgs.text(query, max_results=5):
                     results.append({
-                        "title": topic.get("FirstURL", "").split("/")[-1].replace("_", " "),
-                        "content": topic["Text"],
-                        "url": topic.get("FirstURL", ""),
+                        "title": r.get("title", ""),
+                        "content": r.get("body", ""),
+                        "url": r.get("href", "")
                     })
-
             if results:
-                logger.info(f"🦆 DuckDuckGo returned {len(results)} results")
+                logger.info(f"🦆 DDGS returned {len(results)} results")
             else:
-                logger.info(f"🦆 DuckDuckGo: no instant answers for '{query}'")
-
+                logger.info(f"🦆 DDGS: no results found for '{query}'")
             return results
+        except ImportError:
+            logger.error("🦆 duckduckgo_search missing! Run: pip install duckduckgo-search")
+            return []
         except Exception as e:
-            logger.warning(f"🦆 DuckDuckGo fallback failed: {e}")
+            logger.warning(f"🦆 DuckDuckGo (DDGS) fallback failed: {e}")
             return []
 
     # ----------------------------------------------------------
@@ -747,8 +740,9 @@ class LibrarianRouter:
                 packet['web_data']    = None
                 # Inject a note so LLM knows web was attempted but failed
                 packet['memory_tank'] = (
-                    f"[Note: Live web search was attempted but unavailable. "
-                    f"Answer from training knowledge and note it may not be current.]"
+                    f"[SYSTEM INSTRUCTION: Live web search is currently offline. "
+                    f"You MUST explicitly inform the user that you cannot fetch live/current data. "
+                    f"DO NOT guess, invent, or use the conversation history to fabricate news/data.]"
                 )
 
         total_ms = (time.perf_counter() - t_total) * 1000

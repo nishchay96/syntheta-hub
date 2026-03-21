@@ -1,0 +1,25 @@
+{
+  "apis": [
+    {
+      "API_ID": "MOVIEDB_SEARCH",
+      "Description": "Find movie details, cast, crew, release dates, and ratings.",
+      "Keywords": ["film", "actor", "director", "release date", "movie", "cinema"],
+      "Endpoint": "https://api.themoviedb.org/3/search/movie",
+      "Schema": {"query": "{user_query}"}
+    },
+    {
+      "API_ID": "WEATHER_CURRENT",
+      "Description": "Get current weather conditions, temperature, and forecast for a city.",
+      "Keywords": ["weather", "temperature", "forecast", "rain", "sunny", "climate"],
+      "Endpoint": "https://api.openweathermap.org/data/2.5/weather",
+      "Schema": {"q": "{location}"}
+    },
+    {
+      "API_ID": "CRYPTO_PRICE",
+      "Description": "Get the current market price and 24h change for cryptocurrencies like Bitcoin or Ethereum.",
+      "Keywords": ["crypto", "bitcoin", "ethereum", "price", "market", "currency"],
+      "Endpoint": "https://api.coingecko.com/api/v3/simple/price",
+      "Schema": {"ids": "{coin}", "vs_currencies": "usd"}
+    }
+  ]
+}

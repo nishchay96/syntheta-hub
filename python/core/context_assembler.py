@@ -172,7 +172,7 @@ class ContextAssembler:
     # =========================================================
     # MAIN ENTRY — called by engine._handle_normal_command()
     # =========================================================
-    def build_context_string(self, user_input=""):
+    def build_context_string(self, user_id, user_input=""):
         """
         Assembles context block injected into GoldenPacket.
         Three layers:
@@ -199,7 +199,7 @@ class ContextAssembler:
             )
 
         # 3. User profile from SQL core_memory (NightWatchman writes this)
-        core_facts = self.db.get_all_core_facts()
+        core_facts = self.db.get_all_core_facts(user_id)
         if core_facts:
             profile_lines = []
             for k, data in core_facts.items():

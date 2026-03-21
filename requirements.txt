@@ -7,3 +7,4 @@ soundfile
 torch
 kokoro
 python-dotenv
+duckduckgo-search

@@ -122,6 +122,12 @@ if __name__ == "__main__":
         # from services.memory_worker import MemoryWorker
         # worker = MemoryWorker(state_manager)
         # worker.start()
+        
+        # 🟢 START THE IDLE LIBRARIAN
+        from services.idle_librarian import IdleLibrarian
+        librarian = IdleLibrarian(state_manager)
+        librarian.start()
+        print("✅ Idle Librarian Background Task Started.")
 
     except Exception as e:
         print(f"❌ CRITICAL: Engine Init Failed: {e}")

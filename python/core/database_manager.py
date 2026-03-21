@@ -40,6 +40,20 @@ class DatabaseManager:
 
                 cursor.execute("DROP TABLE IF EXISTS conversation_state")
 
+                # Hot Cache (Idle Librarian)
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS hot_cache (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        bucket TEXT NOT NULL,
+                        entity_key TEXT NOT NULL,
+                        entity_value TEXT NOT NULL,
+                        vector_blob BLOB,
+                        last_updated REAL NOT NULL,
+                        ttl_seconds INTEGER NOT NULL,
+                        UNIQUE(bucket, entity_key)
+                    )
+                ''')
+
                 # Event Ledger
                 cursor.execute('''
                     CREATE TABLE IF NOT EXISTS event_ledger (
@@ -118,6 +132,7 @@ class DatabaseManager:
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_telemetry_date ON reflex_telemetry(date);")
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_core_user_key  ON core_memory(user_id, entity_key);")
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_queue_status   ON memory_queue(status);")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_hot_cache      ON hot_cache(bucket, entity_key);")
 
                 conn.commit()
                 logger.info("✅ Database Architecture Upgraded: Multi-User Vector Isolation Active.")
@@ -292,6 +307,16 @@ class DatabaseManager:
             logger.error(f"❌ get_all_core_facts failed: {e}")
             return {}
 
+    def get_all_user_buckets(self):
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT DISTINCT bucket FROM core_memory WHERE user_id != 'Guest'")
+                return [row[0] for row in cursor.fetchall() if row[0]]
+        except Exception as e:
+            logger.error(f"❌ get_all_user_buckets failed: {e}")
+            return []
+
     def get_relevant_memories(self, user_id, query_vector, top_k=3):
         """
         Cosine-similarity search over core_memory vector_blob column, strictly filtered by user_id.
@@ -353,4 +378,74 @@ class DatabaseManager:
                 return cursor.lastrowid
         except Exception as e:
             logger.error(f"❌ Task creation failed: {e}")
+            return None
+
+    # ----------------------------------------------------------
+    # IDLE LIBRARIAN (HOT CACHE)
+    # ----------------------------------------------------------
+    def save_hot_cache(self, bucket, entity_key, entity_value, vector=None, ttl_seconds=3600):
+        vector_bytes = (np.array(vector, dtype=np.float32).tobytes()
+                        if vector is not None else None)
+        
+        if isinstance(entity_value, dict):
+            entity_value = json.dumps(entity_value, ensure_ascii=False)
+            
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT INTO hot_cache
+                        (bucket, entity_key, entity_value, vector_blob, last_updated, ttl_seconds)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(bucket, entity_key) DO UPDATE SET
+                        entity_value = excluded.entity_value,
+                        vector_blob  = excluded.vector_blob,
+                        last_updated = excluded.last_updated,
+                        ttl_seconds  = excluded.ttl_seconds
+                ''', (bucket, entity_key.lower(), entity_value, vector_bytes, time.time(), ttl_seconds))
+                conn.commit()
+        except Exception as e:
+            logger.error(f"❌ Failed to save hot cache: {e}")
+
+    def clean_expired_cache(self):
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                now = time.time()
+                cursor.execute("DELETE FROM hot_cache WHERE (? - last_updated) > ttl_seconds", (now,))
+                deleted = cursor.rowcount
+                conn.commit()
+                if deleted > 0:
+                    logger.info(f"🧹 Cleared {deleted} expired entries from Hot Cache.")
+        except Exception as e:
+            logger.error(f"❌ Failed to clean hot cache: {e}")
+
+    def get_hot_cache_match(self, query_vector, threshold=0.85):
+        self.clean_expired_cache()
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT entity_key, entity_value, vector_blob FROM hot_cache WHERE vector_blob IS NOT NULL")
+                rows = cursor.fetchall()
+            
+            if not rows:
+                return None
+                
+            q_vec = np.array(query_vector, dtype=np.float32)
+            scored = []
+            for key, value, blob in rows:
+                mem_vec = np.frombuffer(blob, dtype=np.float32)
+                denom = np.linalg.norm(q_vec) * np.linalg.norm(mem_vec)
+                similarity = float(np.dot(q_vec, mem_vec) / denom) if denom > 0 else 0.0
+                scored.append((similarity, key, value))
+                
+            scored.sort(reverse=True, key=lambda x: x[0])
+            best_sim, best_key, best_val = scored[0]
+            
+            if best_sim >= threshold:
+                logger.info(f"🔥 Hot Cache HIT: [{best_key}] (score: {best_sim:.3f})")
+                return best_val
+            return None
+        except Exception as e:
+            logger.error(f"❌ Hot Cache search failed: {e}")
             return None
