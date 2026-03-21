@@ -104,13 +104,20 @@ class RealtimeMemoryCapture:
     get_context_fast() reads existing JSON files — zero LLM calls.
     """
 
-    def __init__(self, db_manager, vault_path):
+    def __init__(self, db_manager, vault_path, on_memory_changed=None):
         self.db         = db_manager
         self.vault_path = vault_path
+        self.on_memory_changed = on_memory_changed
         self._user_dirs = {}        # {sat_id: str}
         self._last_entity = {}      # {sat_id: {"bucket": str, "node": str}}
         self.router     = None      # Wired by engine.__init__
         os.makedirs(vault_path, exist_ok=True)
+
+    def user_exists(self, user_id: str) -> bool:
+        """Checks if a vault directory exists for a given user name."""
+        clean = re.sub(r'[^a-zA-Z0-9_]', '', user_id).lower().strip()
+        if not clean: return False
+        return os.path.exists(os.path.join(self.vault_path, clean))
 
     # ----------------------------------------------------------
     # VAULT
@@ -130,7 +137,7 @@ class RealtimeMemoryCapture:
     # ----------------------------------------------------------
     # HOT-PATH ENTRY
     # ----------------------------------------------------------
-    def capture(self, sat_id: int, user_text: str, llm_response: str = ""):
+    def capture(self, sat_id: int, user_text: str, llm_response: str = "", interaction_id = None):
         """Returns immediately. Triage runs in background thread."""
         if self._is_trivial(user_text):
             return
@@ -141,9 +148,9 @@ class RealtimeMemoryCapture:
                 "llm_response": llm_response,
                 "sat_id":       sat_id,
                 "timestamp":    datetime.now().isoformat()
-            })
+            }, interaction_id=interaction_id)
         except Exception as e:
-            logger.error(f"[Capture] Queue write failed: {e}")
+            logger.error(f"❌ [Capture] Queue write failed: {e}")
 
         # Background triage
         threading.Thread(
@@ -175,16 +182,20 @@ class RealtimeMemoryCapture:
     # BACKGROUND PIPELINE — full 4-stage pipeline from tester
     # ----------------------------------------------------------
     def _background_triage(self, sat_id: int, user_text: str, llm_response: str):
+        logger.info(f"🧠 [Capture] Starting extraction thread for Sat {sat_id}...")
         user_dir = self._get_user_dir(sat_id)
         try:
             # Pre-process: resolve pronouns using last_entity context
             processed_text = self._preprocess(user_text, sat_id)
+            logger.debug(f"🧠 [Capture] Preprocessed: '{user_text}' -> '{processed_text}'")
 
             # Stage 1: Triage — bucket routing
             facts = self._triage_fact(processed_text, user_dir)
             if not facts:
+                logger.debug(f"🧠 [Capture] No facts extracted from: '{processed_text}'")
                 return
 
+            logger.info(f"🧠 [Capture] Extracted {len(facts)} facts. Updating ledger...")
             for bucket, summary in facts:
                 # Resolve target node from entity context
                 target = self._resolve_target(sat_id, bucket, summary)
@@ -281,15 +292,21 @@ Output raw JSON only.
         for raw in raw_blocks:
             try:
                 d = json.loads(raw)
-                if not d.get("is_permanent", True) is False:
-                    pass  # Allow through — is_permanent not required in triage
-                bucket  = d.get("bucket", "General").strip().title()
                 summary = d.get("fact_summary", text).strip()
+                bucket  = d.get("bucket", "General").strip().title()
+                
+                if d.get("is_permanent") is False:
+                    logger.info(f"🧠 [Triage] Skipping transient fact: {summary}")
+                    continue
+                
                 if not summary:
                     continue
+                
                 bucket = self._normalize_bucket(bucket, existing)
                 results.append((bucket, summary))
-            except Exception:
+                logger.debug(f"🧠 [Triage] Routed '{summary}' -> {bucket}")
+            except Exception as e:
+                logger.error(f"⚠️ [Triage] Failed to parse block: {raw} | Error: {e}")
                 pass
 
         return results if results else None
@@ -360,42 +377,6 @@ Output ONE JSON object. Raw JSON only."""
     # ----------------------------------------------------------
     # STAGE 2B: MERGE NODE (FEW-SHOT OPTIMIZED)
     # ----------------------------------------------------------
-    def _merge_node(self, existing_nodes: dict, fact_summary: str,
-                    bucket_name: str, current_date: str, target_node: str = None) -> dict:
-        nodes_json = json.dumps(existing_nodes, indent=2)
-        target_hint = f'\nTARGET NODE: "{target_node}" — update this node if fact is about it.' if target_node and target_node in existing_nodes else ""
-
-        prompt = f"""Update a memory JSON with one new fact.
-
-DATE: {current_date}
-BUCKET: {bucket_name}{target_hint}
-
-EXISTING NODES:
-{nodes_json}
-
-NEW FACT: "{fact_summary}"
-
-RULES:
-1. Match fact to correct existing node by entity name, OR create a new root node.
-2. OVERWRITE conflicting keys. PRESERVE ALL existing nodes exactly.
-3. Extract ONLY what is in NEW FACT. Do not invent.
-
-EXAMPLES (Merging "Color: Blue" into existing Toyota node):
-Existing: {{"Toyota": {{"Status": "Owned"}}}}
-New Fact: "My Toyota is blue"
-Output: {{"Toyota": {{"Status": "Owned", "Color": "Blue"}}}}
-
-Output the COMPLETE updated nodes dict. Raw JSON only."""
-
-        raw_blocks = self._call_llm(prompt, enforce_json=True)
-        if not raw_blocks: return None
-        raw_blocks.sort(key=len, reverse=True)
-        for raw in raw_blocks:
-            try:
-                r = json.loads(raw)
-                if isinstance(r, dict) and r: return r
-            except Exception: continue
-        return None
     # ----------------------------------------------------------
     # STAGE 2B: MERGE NODE — existing bucket
     # Ported from tester._merge_node()
@@ -594,8 +575,10 @@ Output the COMPLETE updated nodes dict. Raw JSON only."""
             )
 
         if not merged:
-            logger.warning(f"[Ledger] LLM returned nothing for '{fact_summary[:50]}'")
+            logger.warning(f"🧠 [Ledger] LLM returned nothing for '{fact_summary[:50]}' in bucket {bucket_name}")
             return
+
+        logger.debug(f"🧠 [Ledger] Merged nodes: {list(merged.keys())}")
 
         # Stage 3: validate
         merged = self._validate_nodes(
@@ -622,7 +605,33 @@ Output the COMPLETE updated nodes dict. Raw JSON only."""
                 self._set_last_entity(sat_id, bucket_name, node_name)
                 break
 
-        # Notify router to update personal anchor
+        # Notify engine/router to refresh the UI matrix and personal anchor
+        user_name = os.path.basename(os.path.normpath(user_dir))
+        
+        # 🟢 IMMEDIATE SQL SYNC
+        for node_name, attrs in merged.items():
+            if node_name.strip().lower() in NODE_STOPWORDS:
+                continue
+
+            sql_key = f"{bucket_name.lower()}.{node_name.lower().replace(' ', '_')}"
+            
+            # Create vector based on a readable string
+            flat_text_for_vector = ", ".join(f"{k}: {v}" for k, v in attrs.items()) if isinstance(attrs, dict) else str(attrs)
+            vector = self._get_nomic_vector(f"{node_name}: {flat_text_for_vector}")
+            
+            self.db.save_core_fact(
+                user_id=user_name,
+                bucket=bucket_name.replace(" ", "_"),
+                entity_key=sql_key,
+                entity_value=attrs, 
+                confidence=100,
+                vector=vector
+            )
+            logger.info(f"⚡ [Immediate Sync] {user_name} :: {sql_key}")
+
+        if self.on_memory_changed:
+            self.on_memory_changed(sat_id, user_name)
+
         if self.router is not None:
             for node_name, attrs in merged.items():
                 try:
@@ -671,6 +680,23 @@ Output the COMPLETE updated nodes dict. Raw JSON only."""
         with open(md_path, 'w', encoding='utf-8') as f:
             f.write("\n".join(lines))
 
+    def _get_nomic_vector(self, text):
+        try:
+            payload = {
+                "model":  NOMIC_MODEL,
+                "prompt": f"search_document: {text}"
+            }
+            req = urllib.request.Request(
+                OLLAMA_EMBED_URL,
+                data=json.dumps(payload).encode('utf-8'),
+                headers={'Content-Type': 'application/json'}
+            )
+            with urllib.request.urlopen(req, timeout=8.0) as res:
+                return json.loads(res.read().decode('utf-8'))['embedding']
+        except Exception as e:
+            logger.error(f"⚠️ Vector gen failed: {e}")
+            return None
+
     # ----------------------------------------------------------
     # LLM CALL
     # ----------------------------------------------------------
@@ -687,6 +713,8 @@ Output the COMPLETE updated nodes dict. Raw JSON only."""
             content = res.json().get("message", {}).get("content", "")
             content = re.sub(r'<think>.*?</think>', '', content,
                              flags=re.DOTALL).strip()
+            
+            logger.debug(f"🤖 [LLM] Raw Response: {content}")
             if enforce_json:
                 # Repair trailing commas before parsing
                 matches = re.findall(
@@ -705,55 +733,6 @@ Output the COMPLETE updated nodes dict. Raw JSON only."""
             logger.error(f"[LLM] Call failed: {e}")
             return [] if enforce_json else None
 
-    # ----------------------------------------------------------
-    # FAST CONTEXT RETRIEVAL — hot path, zero LLM calls
-    # ----------------------------------------------------------
-    def get_context(self, sat_id: int, query: str,
-                          top_k: int = 3) -> str:
-        user_dir = self._get_user_dir(sat_id)
-        if not os.path.exists(user_dir):
-            return ""
-
-        stop_words = {
-            "the", "is", "at", "in", "a", "an", "and", "or",
-            "what", "who", "how", "tell", "me", "my", "do",
-            "i", "have", "was", "has", "been", "are", "you"
-        }
-        query_words = [
-            w for w in re.findall(r'\w+', query.lower())
-            if w not in stop_words and len(w) > 2
-        ]
-        if not query_words:
-            return ""
-
-        scored = []
-        for json_file in glob.glob(os.path.join(user_dir, "Bucket_*.json")):
-            try:
-                with open(json_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                bucket = data.get("bucket", "Unknown")
-                for node_name, attrs in data.get("nodes", {}).items():
-                    node_text = node_name.lower()
-                    attr_text = (
-                        " ".join(f"{k} {v}" for k, v in attrs.items()).lower()
-                        if isinstance(attrs, dict) else str(attrs).lower()
-                    )
-                    score = sum(
-                        2 if w in node_text else (1 if w in attr_text else 0)
-                        for w in query_words
-                    )
-                    if score > 0:
-                        detail = (
-                            ", ".join(f"{k}: {v}" for k, v in attrs.items())
-                            if isinstance(attrs, dict) else str(attrs)
-                        )
-                        scored.append(
-                            (score, f"[{bucket}] {node_name}: {detail}"))
-            except Exception:
-                continue
-
-        scored.sort(key=lambda x: x[0], reverse=True)
-        return "\n".join(text for _, text in scored[:top_k]) if scored else ""
 
 
 # ============================================================
@@ -762,7 +741,7 @@ Output the COMPLETE updated nodes dict. Raw JSON only."""
 # Generates Nomic vectors. Handles contradiction via biographer.
 # ============================================================
 class MemoryWorker:
-    def __init__(self, state_manager):
+    def __init__(self, state_manager, on_memory_changed=None):
         self.state   = state_manager
         self.db      = DatabaseManager()
         self.llm     = OllamaBridge()
@@ -774,7 +753,7 @@ class MemoryWorker:
         self.vault_path = KNOWLEDGE_VAULT_PATH
         os.makedirs(self.vault_path, exist_ok=True)
 
-        self.capture     = RealtimeMemoryCapture(self.db, self.vault_path)
+        self.capture     = RealtimeMemoryCapture(self.db, self.vault_path, on_memory_changed=on_memory_changed)
         self._sync_state = {}   # {json_path: mtime}
 
     def start(self):
@@ -1029,34 +1008,3 @@ class MemoryWorker:
             with open(filepath, 'w', encoding='utf-8') as f:
                 f.write(f"# Memory: {safe}\n\n{entry}")
 
-    # ----------------------------------------------------------
-    # HELPERS
-    # ----------------------------------------------------------
-    def _get_sql_fact(self, key):
-        try:
-            with self.db.get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    "SELECT entity_value FROM core_memory WHERE entity_key=?",
-                    (key.lower(),))
-                row = cursor.fetchone()
-                return row[0] if row else None
-        except Exception:
-            return None
-
-    def _get_nomic_vector(self, text):
-        try:
-            payload = {
-                "model":  NOMIC_MODEL,
-                "prompt": f"search_document: {text}"
-            }
-            req = urllib.request.Request(
-                OLLAMA_EMBED_URL,
-                data=json.dumps(payload).encode('utf-8'),
-                headers={'Content-Type': 'application/json'}
-            )
-            with urllib.request.urlopen(req, timeout=8.0) as res:
-                return json.loads(res.read().decode('utf-8'))['embedding']
-        except Exception as e:
-            logger.error(f"⚠️ Vector gen failed: {e}")
-            return None

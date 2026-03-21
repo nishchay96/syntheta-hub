@@ -1,12 +1,11 @@
 import threading
 import time
-import numpy as np
+import json
+import wave
 import logging
 import sys
 import os
 import re
-import json
-import wave
 import urllib.request
 from datetime import datetime
 import requests
@@ -35,13 +34,11 @@ from core.context_assembler import ContextAssembler
 from core.database_manager  import DatabaseManager
 from core.gatekeeper        import AudioGatekeeper
 from nlu.llm_bridge         import OllamaBridge
-from nlu.semantic_brain     import SemanticBrain
 from nlu.router_bridge      import LibrarianRouter
 from core.pi_manager        import PiManager
 from .state_manager         import EngineState
 from .transcriber           import AudioTranscriber
 from .config                import *
-from .config                import ENABLE_LATENCY_TELEMETRY, KNOWLEDGE_VAULT_PATH
 from .communications        import HomeAssistantClient, WebUIInjector
 from .audio_tools           import pad_audio_file
 from tts_engine             import TTSEngine
@@ -86,7 +83,6 @@ class SynthetaEngine:
         self.emitter     = STTEventEmitter()
         self.assembler   = ContextAssembler(self.db)
         self.transcriber = AudioTranscriber()
-        self.brain       = SemanticBrain()
         self.llm         = OllamaBridge()
         self.gatekeeper  = AudioGatekeeper()
 
@@ -97,7 +93,7 @@ class SynthetaEngine:
             logger.warning(f"⚠️ TTS Disabled: {e}")
             self.tts = None
 
-        self.nightwatchman = MemoryWorker(self.state)
+        self.nightwatchman = MemoryWorker(self.state, on_memory_changed=lambda sid, user: self._broadcast_memory_matrix(sid, user))
         self.nightwatchman.start()
 
         self.librarian = LibrarianRouter()
@@ -117,11 +113,25 @@ class SynthetaEngine:
         self.pending_force_listen    = {}
         self.is_thinking             = False
         
+        # Debounce for Memory Matrix Broadcasts
+        self._last_matrix_broadcast  = 0.0
+        self._last_matrix_data       = None
+        self._matrix_cooldown        = 5.0
+        
+        # Debounce for Memory Matrix Broadcasts
+        self._last_matrix_broadcast  = 0
+        self._matrix_cooldown        = 5.0
+        
         threading.Thread(target=self._processing_loop,     daemon=True).start()
         threading.Thread(target=self._monitor_loop,        daemon=True).start()
         threading.Thread(target=self._sudo_heartbeat_loop, daemon=True).start()
 
         self._play_boot_sound()
+        
+        # 🔥 Hot-load models into VRAM immediately
+        threading.Thread(target=self.librarian.pre_load, daemon=True).start()
+        threading.Thread(target=self.llm.pre_load,       daemon=True).start()
+        
         logger.info("🟢 ENGINE READY.")
 
     def register_comms(self, comms_instance):
@@ -154,8 +164,16 @@ class SynthetaEngine:
     # =========================================
     def _broadcast_memory_matrix(self, sat_id: int, username: str):
         """Fetches SQL core memory and builds a graph for the D3.js UI."""
+        # 🟢 DEBOUNCE: Prevent duplicate animations if called in rapid succession
+        now = time.time()
+        if now - self._last_matrix_broadcast < self._matrix_cooldown:
+            return
+        self._last_matrix_broadcast = now
+
         try:
-            raw_facts = self.db.get_all_core_facts(username)
+            # 🟢 FIX: Ensure username is lowercase to match database partition
+            username_clean = username.lower()
+            raw_facts = self.db.get_all_core_facts(username_clean)
             memory_graph = {}
             
             for key, data in raw_facts.items():
@@ -168,11 +186,22 @@ class SynthetaEngine:
                 if entity_name not in memory_graph[bucket]:
                     memory_graph[bucket].append(entity_name)
 
+            # 🟢 DATA-AWARE BROADCAST: Only emit if the actual structure changed
+            if self._last_matrix_data == memory_graph:
+                return
+            self._last_matrix_data = memory_graph
+
             # Broadcast the assembled graph
-            self.emit_to_webui(sat_id, "profile_loaded", {
-                "user": username,
+            payload = {
+                "user": username, # Keep original case for UI display 
                 "data": memory_graph
-            })
+            }
+            
+            # 🟢 FIX: Broadcast to both the target Satellite AND the Web UI (Sat 0)
+            self.emit_to_webui(sat_id, "profile_loaded", payload)
+            if str(sat_id) != "0":
+                self.emit_to_webui(0, "profile_loaded", payload)
+                
             logger.info(f"🌐 Broadcasted Memory Matrix for '{username}' ({len(raw_facts)} nodes)")
         except Exception as e:
             logger.error(f"⚠️ Failed to broadcast memory matrix: {e}")
@@ -227,8 +256,10 @@ class SynthetaEngine:
         active_user = self.state.get_active_user(sat_id)
         self.nightwatchman.capture.set_user(active_user, sat_id)
         
-        # 🟢 FIX: Automatically load the Memory Matrix if the user is already identified
+        # 🟢 FIX: Immediate Sync of Vault Files to Database
         if active_user and active_user != "Guest":
+            user_dir = self.nightwatchman.capture._get_user_dir(sat_id)
+            self.nightwatchman._sync_vault_to_sql(user_dir, "Hardware Wake Sync")
             self._broadcast_memory_matrix(sat_id, active_user)
             
         self.pi.start_new_session(sat_id)
@@ -431,6 +462,20 @@ class SynthetaEngine:
                 is_last = (i == len(sub_commands) - 1)
                 self._handle_normal_command(sat_id, sub.strip(), sub_tele, is_silent=(not is_last))
 
+    def _activate_profile(self, sat_id: int, username: str, is_new: bool = False):
+        """Consolidated helper to switch users and sync UI."""
+        self.state.set_active_user(sat_id, username)
+        self.nightwatchman.capture.set_user(username, sat_id)
+        
+        # Immediate Sync of Vault Files to Database
+        user_dir = self.nightwatchman.capture._get_user_dir(sat_id)
+        self.nightwatchman._sync_vault_to_sql(user_dir, "Profile Activation")
+        
+        self._broadcast_memory_matrix(sat_id, username)
+        
+        msg = f"Welcome back, {username}. I have loaded your profile." if not is_new else f"I've created a new profile for you, {username}. How can I help today?"
+        self._speak(sat_id, msg, force_listen=False)
+
     # =========================================
     # LOGIC HANDLER — THE BRAIN
     # =========================================
@@ -439,49 +484,52 @@ class SynthetaEngine:
             telemetry = {}
         current_session_id = self.state.session_start_time
 
-        # 🟢 FIX 1: The Context-Aware Identity Intercept
+        # 🟢 IDENTITY LOGIC REFINEMENT (Load vs Create)
         clean_text = text.lower().strip()
-        id_match = re.match(r"^(i am|i'm|my name is|call me)\s+([a-zA-Z]+)", clean_text)
         
-        # Check if the system literally just asked the user for their name
-        just_asked = False
-        if sat_id in self.state.identity_state:
-            just_asked = self.state.identity_state[sat_id].get("has_prompted", False)
+        # 1. CREATE INTENT (Explicit)
+        create_match = re.search(r"(create|make|setup)\s+(a\s+)?(profile|account)\s+(for|of)\s+([a-zA-Z]+)", clean_text)
+        
+        # 2. LOAD INTENT (Implicit identification)
+        load_match = re.match(r"^(i am|i'm|my name is|call me)\s+([a-zA-Z]+)", clean_text)
+        
+        # 3. Confirmation State (Wait for Yes/No)
+        confirm_state = self.state.identity_state.get(sat_id, {})
+        is_waiting_confirm = confirm_state.get("is_waiting_confirm", False)
+        pending_name = confirm_state.get("pending_name")
+        just_asked = confirm_state.get("has_prompted", False)
 
-        new_name = None
-        if id_match:
-            new_name = id_match.group(2)
-        elif just_asked and len(clean_text.split()) <= 2:
-            # If they just say "Nishchay" or "Nishchay here" after being asked
-            new_name = clean_text.replace("here", "").strip().split()[0]
-            
-        if new_name and new_name.isalpha():
-            new_name = new_name.capitalize()
-            self.state.set_active_user(sat_id, new_name)
-            
-            # Immediately map vault to new user
-            self.nightwatchman.capture.set_user(new_name, sat_id)
-            self._broadcast_memory_matrix(sat_id, new_name)
-            self._speak(sat_id, f"Welcome, {new_name}. I have loaded your profile.", force_listen=False)
+        # --- CASE A: Explicit Creation ---
+        if create_match:
+            new_name = create_match.group(5).capitalize()
+            self._activate_profile(sat_id, new_name, is_new=True)
             return
 
-        # 🟢 CRITICAL: The previously deleted Brain processing block
-        brain_start = time.perf_counter()
-        processed   = self.brain.process(text)
-        telemetry["brain_lat_ms"] = round(
-            (time.perf_counter() - brain_start) * 1000, 2)
-
-        plan = self.pi.process_query(sat_id, text)
-
-        if not plan and processed.get('intent') and isinstance(processed['intent'], dict):
-            brain_intent = processed['intent']
-            if brain_intent.get('intent') and brain_intent['intent'] != 'unknown':
-                plan = {
-                    "intent":    brain_intent['intent'],
-                    "execute":   brain_intent.get('payload'),
-                    "speak":     brain_intent.get('reply_template'),
-                    "raw_input": text,
+        # --- CASE B: Loading Identification ---
+        if load_match:
+            id_name = load_match.group(2).capitalize()
+            if self.nightwatchman.capture.user_exists(id_name):
+                self._activate_profile(sat_id, id_name, is_new=False)
+            else:
+                self.state.identity_state[sat_id] = {
+                    "is_waiting_confirm": True,
+                    "pending_name": id_name
                 }
+                self._speak(sat_id, f"I don't have a profile for {id_name} yet. Should I create one for you?")
+            return
+
+        # --- CASE D: Confirmation Response ---
+        if is_waiting_confirm and pending_name:
+            if any(w in clean_text for w in ["yes", "yeah", "sure", "ok", "create"]):
+                self._activate_profile(sat_id, pending_name, is_new=True)
+                self.state.identity_state[sat_id] = {} # Clear state
+            elif any(w in clean_text for w in ["no", "dont", "don't", "stop"]):
+                self._speak(sat_id, "No problem. I'll keep you as Guest for now.")
+                self.state.identity_state[sat_id] = {} # Clear state
+            return
+
+        # 🟢 UNIFIED INTENT PROCESSING: Rely on PiManager
+        plan = self.pi.process_query(sat_id, text)
 
         # Reflex Execution (Bypasses Identity Tracking)
         if plan:
@@ -492,7 +540,24 @@ class SynthetaEngine:
             if intent == "RESUME_CANCELLED":
                 self.handle_resume_confirmation(sat_id, False); return
             if intent and intent != "unknown":
+                # Clear identity prompt if we executed a command instead of answering the name
+                if just_asked or is_waiting_confirm:
+                    self.state.identity_state[sat_id] = {}
                 self._execute_plan(sat_id, plan, telemetry); return
+
+        # --- CASE C: Prompted Response (Simplified "Nishchay") ---
+        if just_asked and len(clean_text.split()) <= 2:
+            # If they just say "Nishchay" or "Nishchay here"
+            name = clean_text.replace("here", "").strip().split()[0].capitalize()
+            if self.nightwatchman.capture.user_exists(name):
+                self._activate_profile(sat_id, name, is_new=False)
+            else:
+                self.state.identity_state[sat_id] = {
+                    "is_waiting_confirm": True,
+                    "pending_name": name
+                }
+                self._speak(sat_id, f"I don't have a profile for {name} yet. Should I create one?")
+            return
 
         is_fresh_session       = not getattr(self.state, 'is_conversation', False)
         self.state.is_conversation = True
@@ -530,7 +595,8 @@ class SynthetaEngine:
         # Point the working memory capture to the correct user vault
         self.nightwatchman.capture.set_user(active_user, sat_id)
 
-        memory_ctx = self.nightwatchman.capture.get_context(sat_id, text, top_k=3)
+        # 🟢 CONSOLIDATED CONTEXT: Use build_context_string instead of capture.get_context
+        memory_ctx = self.assembler.build_context_string(text)
 
         self.state.update_context(sat_id, text, new_entities={})
 
@@ -541,8 +607,8 @@ class SynthetaEngine:
         # 🟢 Create the Golden Packet
         packet = self.state.build_golden_packet(
             sat_id,
-            processed['input'],
-            processed.get('emotion', 'neutral'),
+            text,
+            "neutral",
             memory_context=memory_ctx
         )
 
@@ -597,24 +663,14 @@ class SynthetaEngine:
                 resolved_query    = resolved_input,
                 topic_category    = current_topic,
                 nomic_confidence  = confidence,
-                extracted_entities = processed.get('entities', {})
+                extracted_entities = {}
             )
 
-            # 🟢 FIX 4: Database Shield — Never extract or save Guest memory
-            if active_user != "Guest":
-                task_id = self.db.create_memory_task(
-                    {
-                        "user_query":     resolved_input,
-                        "llm_response":   llm_response,
-                        "topic":          current_topic,
-                        "active_subject": active_subject,
-                        "sat_id":         sat_id  
-                    },
-                    interaction_id=interaction_id
-                )
-                logger.info(f"💾 Interaction {interaction_id} → task {task_id}")
-            else:
-                logger.info("👻 Guest active. Deep memory extraction skipped.")
+            # 🟢 TRIGGER MEMORY CAPTURE (Background Triage + Queue Task)
+            self.nightwatchman.capture.capture(sat_id, resolved_input, llm_response, interaction_id=interaction_id)
+
+            if active_user == "Guest":
+                logger.info("预览: Guest profile active. Deep memory extraction suppressed in background thread.")
 
             if llm_response_dict.get("is_action"):
                 self._execute_plan(sat_id, {

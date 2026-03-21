@@ -228,7 +228,12 @@ class HomeAssistantClient:
 
         try:
             domain, service = service_call.split(".", 1)
-            url = f"{self.base_url}/api/services/{domain}/{service}"
+            # 🟢 FIX: Ensure we don't double-path /api/services if base_url already has it
+            if "/api/services" in self.base_url:
+                url = f"{self.base_url}/{domain}/{service}"
+            else:
+                url = f"{self.base_url}/api/services/{domain}/{service}"
+            
             payload = {"entity_id": "all"} 
             
             logger.info(f"🏠 HA Trigger: {domain}.{service} -> {url}")

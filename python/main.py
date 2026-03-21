@@ -199,11 +199,10 @@ if __name__ == "__main__":
 
                 # C. PROCESS
                 if len(data) > 0:
-                    # 🟢 CRITICAL FIX: Bypass buffering loop to fix 0-Byte Bug
-                    # We hardcode to ID 1 to ensure it hits the active session.
-                    # If your firmware sends a header byte, change this to: sat_id = data[0]; payload = data[1:]
+                    # 🟢 DYNAMIC SAT MAPPING: Use IP to find the SatID
+                    ip_addr = addr[0]
+                    sat_id  = comms.ip_to_sat_id.get(ip_addr, 1)
                     
-                    sat_id = 1 
                     engine_queue(sat_id, data)
 
         except KeyboardInterrupt:

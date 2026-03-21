@@ -112,6 +112,22 @@ class LibrarianRouter:
         self._precompute_static_anchors()
         logger.info("🌐 Librarian Router Online | mistral:7b routing | Parallel Nomic/LLM active")
 
+    def pre_load(self):
+        """Warm up the routing model and pin it in VRAM on startup."""
+        logger.info(f"🔥 Hot-loading {ROUTER_MODEL} (Router) into VRAM...")
+        try:
+            payload = {
+                "model": ROUTER_MODEL,
+                "messages": [{"role": "user", "content": "Syntheta pre-load ping. Reply with 'READY'."}],
+                "stream": False,
+                "keep_alive": -1,
+                "options": {"num_predict": 5}
+            }
+            requests.post(OLLAMA_CHAT_URL, json=payload, timeout=20.0)
+            logger.info(f"✅ {ROUTER_MODEL} (Router) is now PINNED in VRAM.")
+        except Exception as e:
+            logger.error(f"❌ Failed to hot-load router model {ROUTER_MODEL}: {e}")
+
     # ----------------------------------------------------------
     # STARTUP
     # ----------------------------------------------------------

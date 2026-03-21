@@ -28,6 +28,11 @@ PY_DIR = os.path.join(ROOT_DIR, "python")
 TARGET_PORTS = [5555, 5556, 6000, 6002, 8000, 8001, 9001]
 OLLAMA_API_URL = "http://localhost:11434/api/tags"
 
+# Log Management
+LOG_DIR = os.path.join(ROOT_DIR, "assets", "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+LOG_FILE_PATH = os.path.join(LOG_DIR, "syntheta.log")
+
 def log(msg, level="INFO"):
     prefix = {"INFO": "ℹ️", "WARN": "⚠️", "ERROR": "❌", "BOOT": "🚀", "CHECK": "🔍"}.get(level, "")
     print(f"[{level}] {prefix} {msg}", flush=True)
@@ -101,9 +106,23 @@ def ensure_clean_slate():
                 conn.commit()
             log("✅ SQLite Backlog Cleared.", "INFO")
         except Exception as e:
-            log(f"⚠️ Failed to clear SQLite DB natively: {e}", "WARN")
-            
-    time.sleep(0.5)
+            log(f"Failed to clear backlog: {e}", "WARN")
+
+def tail_to_console(stop_event):
+    """Tails the log file to stdout so it's visible in the physical terminal."""
+    # Wait for file to exist
+    while not os.path.exists(LOG_FILE_PATH) and not stop_event.is_set():
+        time.sleep(0.5)
+    
+    with open(LOG_FILE_PATH, 'r', encoding='utf-8', errors='ignore') as f:
+        # Seek to end so we don't dump old logs on restart
+        f.seek(0, os.SEEK_END)
+        while not stop_event.is_set():
+            line = f.readline()
+            if not line:
+                time.sleep(0.1)
+                continue
+            print(line, end='', flush=True)
 
 def ensure_ollama_ready():
     log("Checking LLM Service (Ollama)...", "CHECK")
@@ -121,6 +140,10 @@ def ensure_ollama_ready():
 # 🚀 MAIN LOOP
 # ==============================================================================
 def main():
+    import threading
+    stop_tail = threading.Event()
+    threading.Thread(target=tail_to_console, args=(stop_tail,), daemon=True).start()
+
     os.system("clear")
     print("==========================================")
     print("   SYNTHETA SOVEREIGN BOOTLOADER (V3.0)")
@@ -157,6 +180,11 @@ def main():
 
     while True:
         gateway_process = None
+        # Open log file in append mode
+        log_file = open(LOG_FILE_PATH, "a", encoding="utf-8")
+        log_file.write(f"\n\n--- SYNTHETA SOVEREIGN BOOTLOADER (V3.0) [{time.strftime('%Y-%m-%d %H:%M:%S')}] ---\n")
+        log_file.flush()
+
         try:
             ensure_clean_slate()
 
@@ -165,8 +193,8 @@ def main():
             gateway_process = subprocess.Popen(
                 [VENV_PYTHON, "-m", "uvicorn", "python.web_gateway:app", "--host", "0.0.0.0", "--port", "8001"],
                 cwd=ROOT_DIR,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
+                stdout=log_file,
+                stderr=log_file
             )
 
             # 2. LAUNCH GO BRIDGE
@@ -195,7 +223,9 @@ def main():
             brain_process = subprocess.run(
                 [VENV_PYTHON, "-u", "main.py"], 
                 cwd=PY_DIR,
-                env=brain_env
+                env=brain_env,
+                stdout=log_file,
+                stderr=log_file
             )
 
             # 4. EXIT HANDLING

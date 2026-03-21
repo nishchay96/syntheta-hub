@@ -9,6 +9,9 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, FileResponse
 from pydantic import BaseModel
 from typing import Dict, List, Any, Union
+import psutil
+import subprocess
+import time
 
 logger = logging.getLogger("WebGateway")
 logging.basicConfig(level=logging.INFO)
@@ -58,6 +61,48 @@ class ConnectionManager:
                 self.disconnect(d, sat_id)
 
 manager = ConnectionManager()
+
+def get_vram_info():
+    """Try to grab VRAM stats from nvidia-smi if available."""
+    try:
+        res = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=memory.used,memory.total", "--format=csv,noheader,nounits"],
+            stderr=subprocess.DEVNULL, timeout=1.0
+        )
+        parts = res.decode().strip().split(",")
+        if len(parts) == 2:
+            used  = int(parts[0].strip())
+            total = int(parts[1].strip())
+            return f"{used}/{total} MB", round((used/total)*100, 1)
+    except:
+        pass
+    return "0/0 MB", 0
+
+async def tail_logs():
+    """Background task to stream system logs to the WebUI."""
+    log_path = os.path.join(HUB_ROOT, "assets", "logs", "syntheta.log")
+    # Wait for file to exist
+    while not os.path.exists(log_path):
+        await asyncio.sleep(2)
+    
+    logger.info(f"📁 Tailing logs: {log_path}")
+    with open(log_path, 'r', encoding='utf-8') as f:
+        # Seek to end on startup to avoid flooding old logs
+        f.seek(0, os.SEEK_END)
+        while True:
+            line = f.readline()
+            if not line:
+                await asyncio.sleep(0.5)
+                continue
+            
+            # Broadcast to all connected satellites
+            msg = {"type": "engine_log", "content": line.strip()}
+            for sat_id in list(manager.active_connections.keys()):
+                await manager.broadcast_to_sat(sat_id, msg)
+
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(tail_logs())
 
 # =========================================================
 # 🌉 IPC BRIDGE MODELS & ENDPOINTS
@@ -115,8 +160,22 @@ async def get_root():
 
 @app.get("/api/vitals")
 async def get_vitals():
-    # Placeholder for the endpoint app.js is aggressively polling
-    return {"status": "online", "cpu": 0, "memory": 0}
+    try:
+        mem = psutil.virtual_memory()
+        vram_str, vram_p = get_vram_info()
+        
+        return {
+            "status": "online",
+            "cpu": f"{psutil.cpu_percent()}%",
+            "ram": f"{round(mem.used / (1024**3), 1)}/{round(mem.total / (1024**3), 1)} GB",
+            "ram_pct": mem.percent,
+            "vram": vram_str,
+            "vram_pct": vram_p,
+            "network": "Active"
+        }
+    except Exception as e:
+        logger.error(f"Error gathering vitals: {e}")
+        return {"status": "error", "cpu": "0%", "ram_pct": 0, "vram_pct": 0}
 
 # 🟢 Mount UI assets at the root (styles.css, app.js, etc.)
 if os.path.exists(WEBUI_DIR):

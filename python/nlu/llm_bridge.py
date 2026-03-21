@@ -4,6 +4,7 @@ import sys
 import json
 import re
 import requests
+import time
 from datetime import datetime
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '../../'))
@@ -33,6 +34,22 @@ TOKEN_LIMITS = {
 class OllamaBridge:
     def __init__(self):
         logger.info(f"LLM Bridge Init | Reflex Core Default: {UI_MODEL}")
+
+    def pre_load(self):
+        """Warm up the model and pin it in VRAM on startup."""
+        logger.info(f"🔥 Hot-loading {UI_MODEL} into VRAM...")
+        try:
+            payload = {
+                "model": UI_MODEL,
+                "prompt": "Syntheta pre-load ping. Reply with 'READY'.",
+                "stream": False,
+                "keep_alive": -1,
+                "options": {"num_predict": 5}
+            }
+            requests.post(OLLAMA_API_URL, json=payload, timeout=20.0)
+            logger.info(f"✅ {UI_MODEL} is now PINNED in VRAM.")
+        except Exception as e:
+            logger.error(f"❌ Failed to hot-load {UI_MODEL}: {e}")
 
     # ----------------------------------------------------------
     # JSON EXTRACTION HELPER
@@ -198,15 +215,24 @@ class OllamaBridge:
         system_instruction = self.generate_slm_prompt(packet)
 
         logger.info(
-            f"[LLM] Dispatching to {model_to_use} | "
-            f"Route: {route_taken} | "
+            f"[LLM] START Dispatch: {model_to_use} | Route: {route_taken} | "
             f"Memory Tank Active: {bool(packet.get('memory_tank') or packet.get('memory_context'))}"
         )
-
-        return self._call_ollama_api(
-            user_text, system_instruction,
-            model_to_use, abort_check, route_taken
-        )
+        
+        start_t = time.perf_counter()
+        try:
+            result = self._call_ollama_api(
+                user_text, system_instruction,
+                model_to_use, abort_check, route_taken
+            )
+            
+            elapsed = round((time.perf_counter() - start_t) * 1000, 2)
+            logger.info(f"[LLM] DONE Dispatch: {model_to_use} | Time: {elapsed}ms")
+            return result
+        except Exception as e:
+            elapsed = round((time.perf_counter() - start_t) * 1000, 2)
+            logger.error(f"[LLM] FAILED Dispatch: {model_to_use} | Time: {elapsed}ms | Error: {e}")
+            raise e
 
     # ----------------------------------------------------------
     # LEGACY ADAPTER — keeps PiManager working unchanged

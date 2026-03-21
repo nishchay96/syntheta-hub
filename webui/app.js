@@ -102,7 +102,7 @@ function handleServerMessage(data) {
       break;
 
     case 'engine_log':
-      logToTerminal(data.content, getLogType(data.level));
+      logToTerminal(data.content, getLogType(data.level, data.content));
       break;
 
     case 'vitals_update':
@@ -215,12 +215,13 @@ function logToTerminal(message, type = 'info') {
   }
 }
 
-function getLogType(level = '') {
-  const l = level.toLowerCase();
-  if (l === 'error') return 'error';
-  if (l === 'warn' || l === 'warning') return 'warn';
-  if (l === 'info') return 'info';
-  if (l === 'success') return 'success';
+function getLogType(level = '', content = '') {
+  const l = (level || '').toLowerCase();
+  const c = (content || '').toUpperCase();
+  if (l === 'error' || c.includes('ERROR')) return 'error';
+  if (l === 'warn' || l === 'warning' || c.includes('WARN')) return 'warn';
+  if (l === 'success' || c.includes('SUCCESS') || c.includes('BOOT') || c.includes('READY')) return 'success';
+  if (c.includes('INFO')) return 'info';
   return 'default';
 }
 
