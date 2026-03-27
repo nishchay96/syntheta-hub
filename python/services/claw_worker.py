@@ -4,9 +4,11 @@ import os
 import re
 import time
 
+import requests
+
 from core.database_manager import DatabaseManager
 from nlu.api_scout import APIScout
-from services.config import KNOWLEDGE_VAULT_PATH
+from services.config import GLOBAL_WEATHER_CITY, KNOWLEDGE_VAULT_PATH
 
 logger = logging.getLogger("OpenClawWorker")
 
@@ -46,6 +48,7 @@ class OpenClawWorker:
 
     def _refresh_curated_cache(self):
         self._refresh_global_news()
+        self._refresh_global_weather()
 
         active_profiles = self._get_active_profiles()
         all_profiles = self._get_all_profiles()
@@ -87,8 +90,6 @@ class OpenClawWorker:
             return
 
         try:
-            import requests
-
             res = requests.get(
                 "https://ok.surf/api/v1/cors/news-feed",
                 timeout=10.0,
@@ -133,6 +134,77 @@ class OpenClawWorker:
                 ttl_seconds=GLOBAL_REFRESH_TTL_SEC,
             )
             logger.info(f"📰 OpenClaw refreshed global top news ({len(items)} items)")
+
+    def _refresh_global_weather(self):
+        topic_key = self._topic_key(f"{GLOBAL_WEATHER_CITY}_current")
+        cached = self.db.get_curated_topic("global", "Weather", topic_key, limit=1)
+        if cached:
+            return
+
+        try:
+            geo = requests.get(
+                "https://geocoding-api.open-meteo.com/v1/search",
+                params={"name": GLOBAL_WEATHER_CITY, "count": 1, "language": "en", "format": "json"},
+                timeout=8.0,
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            geo.raise_for_status()
+            results = geo.json().get("results", [])
+            if not results:
+                return
+
+            place = results[0]
+            forecast = requests.get(
+                "https://api.open-meteo.com/v1/forecast",
+                params={
+                    "latitude": place["latitude"],
+                    "longitude": place["longitude"],
+                    "current": "temperature_2m,wind_speed_10m",
+                    "timezone": "auto",
+                },
+                timeout=8.0,
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            forecast.raise_for_status()
+            current = forecast.json().get("current", {})
+            temp = current.get("temperature_2m")
+            wind = current.get("wind_speed_10m")
+            if temp is None and wind is None:
+                return
+        except Exception as e:
+            logger.warning(f"⚠️ OpenClaw global weather refresh failed: {e}")
+            return
+
+        location_label = f"{place['name']}, {place.get('admin1', place.get('country', ''))}".strip(", ")
+        title_bits = [f"Current weather in {location_label}"]
+        if temp is not None:
+            title_bits.append(f"{round(float(temp))}°C")
+        if wind is not None:
+            title_bits.append(f"{round(float(wind))} km/h wind")
+        title = " | ".join(title_bits)
+
+        self.db.replace_curated_topic(
+            scope="global",
+            user_id=None,
+            category="Weather",
+            topic_key=topic_key,
+            items=[{
+                "title": title,
+                "snippet": "",
+                "source_name": "Open-Meteo",
+                "source_url": "",
+                "payload_json": {
+                    "city": place["name"],
+                    "admin1": place.get("admin1"),
+                    "country": place.get("country"),
+                    "temperature_c": temp,
+                    "wind_kmh": wind,
+                },
+                "confidence": 95,
+            }],
+            ttl_seconds=GLOBAL_REFRESH_TTL_SEC,
+        )
+        logger.info(f"🌦️ OpenClaw refreshed global weather for {location_label}")
 
     def _refresh_user_interest_news(self, user_id: str, high_priority: bool = False):
         interests = self._get_user_interest_topics(user_id)

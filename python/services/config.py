@@ -67,6 +67,9 @@ ENABLE_SERVER_WAKE_CHECK = False
 # ==================== INTEGRATIONS ====================
 WAKE_MODELS = []
 
+# ==================== GLOBAL LIVE CACHE DEFAULTS ====================
+GLOBAL_WEATHER_CITY = os.getenv("GLOBAL_WEATHER_CITY", "Guwahati")
+
 # Home Assistant
 HA_URL   = os.getenv("HA_URL", "http://localhost:8123/api/services")
-HA_TOKEN = os.getenv("HA_TOKEN", "")
+HA_TOKEN = os.getenv("HA_TOKEN", "")

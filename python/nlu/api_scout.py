@@ -14,6 +14,7 @@ from urllib.parse import quote_plus
 import xml.etree.ElementTree as ET
 import pandas as pd
 from core.database_manager import DatabaseManager
+from services.config import GLOBAL_WEATHER_CITY
 
 logger = logging.getLogger("APIScout")
 
@@ -1097,6 +1098,12 @@ class APIScout:
             return None
 
     def _handle_weather_query(self, location: str) -> str | None:
+        requested_key = self._topic_cache_key(f"{location}_current")
+        default_key = self._topic_cache_key(f"{GLOBAL_WEATHER_CITY}_current")
+        if requested_key == default_key:
+            cached = self.db.get_curated_topic("global", "Weather", default_key, limit=1)
+            if cached:
+                return self._format_curated_cache(cached, "OpenClaw curated cache")
         try:
             geo = requests.get(
                 "https://geocoding-api.open-meteo.com/v1/search",
