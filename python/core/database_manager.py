@@ -126,6 +126,25 @@ class DatabaseManager:
                     )
                 ''')
 
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS curated_live_cache (
+                        cache_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        scope TEXT NOT NULL,
+                        user_id TEXT,
+                        category TEXT NOT NULL,
+                        topic_key TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        snippet TEXT,
+                        source_name TEXT,
+                        source_url TEXT,
+                        payload_json TEXT,
+                        confidence INTEGER DEFAULT 100,
+                        fetched_at REAL NOT NULL,
+                        expires_at REAL NOT NULL,
+                        UNIQUE(scope, user_id, category, topic_key, title, source_url)
+                    )
+                ''')
+
                 # Indices
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_ledger_date    ON event_ledger(date);")
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_ledger_ts      ON event_ledger(timestamp);")
@@ -133,6 +152,7 @@ class DatabaseManager:
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_core_user_key  ON core_memory(user_id, entity_key);")
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_queue_status   ON memory_queue(status);")
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_hot_cache      ON hot_cache(bucket, entity_key);")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_curated_scope_topic ON curated_live_cache(scope, user_id, category, topic_key, expires_at);")
 
                 conn.commit()
                 logger.info("✅ Database Architecture Upgraded: Multi-User Vector Isolation Active.")
@@ -448,4 +468,137 @@ class DatabaseManager:
             return None
         except Exception as e:
             logger.error(f"❌ Hot Cache search failed: {e}")
+            return None
+
+    # ----------------------------------------------------------
+    # CURATED LIVE CACHE
+    # ----------------------------------------------------------
+    def replace_curated_topic(self, scope, category, topic_key, items, user_id=None, ttl_seconds=600):
+        now = time.time()
+        expires_at = now + ttl_seconds
+        scope_key = str(scope or "global")
+        user_key = str(user_id).lower() if user_id else None
+        category_key = str(category)
+        topic_key = str(topic_key)
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "DELETE FROM curated_live_cache WHERE scope=? AND IFNULL(user_id,'')=IFNULL(?, '') "
+                    "AND category=? AND topic_key=?",
+                    (scope_key, user_key, category_key, topic_key),
+                )
+                for item in items:
+                    cursor.execute(
+                        '''
+                        INSERT INTO curated_live_cache
+                            (scope, user_id, category, topic_key, title, snippet, source_name,
+                             source_url, payload_json, confidence, fetched_at, expires_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ''',
+                        (
+                            scope_key,
+                            user_key,
+                            category_key,
+                            topic_key,
+                            item.get("title", ""),
+                            item.get("snippet"),
+                            item.get("source_name"),
+                            item.get("source_url"),
+                            json.dumps(item.get("payload_json")) if item.get("payload_json") is not None else None,
+                            int(item.get("confidence", 100)),
+                            now,
+                            expires_at,
+                        ),
+                    )
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"❌ replace_curated_topic failed: {e}")
+            return False
+
+    def get_curated_topic(self, scope, category, topic_key, user_id=None, limit=10):
+        scope_key = str(scope or "global")
+        user_key = str(user_id).lower() if user_id else None
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    '''
+                    SELECT title, snippet, source_name, source_url, payload_json, confidence, fetched_at, expires_at
+                    FROM curated_live_cache
+                    WHERE scope=? AND IFNULL(user_id,'')=IFNULL(?, '')
+                      AND category=? AND topic_key=? AND expires_at>?
+                    ORDER BY confidence DESC, fetched_at DESC, cache_id ASC
+                    LIMIT ?
+                    ''',
+                    (scope_key, user_key, category, topic_key, time.time(), limit),
+                )
+                rows = cursor.fetchall()
+                items = []
+                for row in rows:
+                    payload = row[4]
+                    items.append({
+                        "title": row[0],
+                        "snippet": row[1],
+                        "source_name": row[2],
+                        "source_url": row[3],
+                        "payload_json": json.loads(payload) if payload else None,
+                        "confidence": row[5],
+                        "fetched_at": row[6],
+                        "expires_at": row[7],
+                    })
+                return items
+        except Exception as e:
+            logger.error(f"❌ get_curated_topic failed: {e}")
+            return []
+
+    # ----------------------------------------------------------
+    # OPENCLAW JOBS
+    # ----------------------------------------------------------
+    def get_pending_openclaw_jobs(self):
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT job_id, description, parameters FROM openclaw_jobs "
+                    "WHERE status='PENDING' ORDER BY priority ASC, created_at ASC"
+                )
+                return cursor.fetchall()
+        except Exception as e:
+            logger.error(f"❌ Failed to fetch pending OpenClaw jobs: {e}")
+            return []
+
+    def update_openclaw_job_status(self, job_id, status):
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "UPDATE openclaw_jobs SET status=?, updated_at=CURRENT_TIMESTAMP "
+                    "WHERE job_id=?", (status, job_id)
+                )
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"❌ Failed to update OpenClaw job status: {e}")
+            return False
+
+    def insert_openclaw_job(self, task_type, description, parameters=None, priority=5):
+        """Insert a new research job for the OpenClaw worker to process."""
+        import json
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "INSERT INTO openclaw_jobs (status, task_type, priority, description, parameters) "
+                    "VALUES ('PENDING', ?, ?, ?, ?)",
+                    (task_type, priority, description,
+                     json.dumps(parameters) if parameters else None)
+                )
+                conn.commit()
+                job_id = cursor.lastrowid
+                logger.info(f"📋 Queued OpenClaw {task_type} job #{job_id}: {description[:60]}")
+                return job_id
+        except Exception as e:
+            logger.error(f"❌ Failed to insert OpenClaw job: {e}")
             return None

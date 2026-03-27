@@ -4,7 +4,7 @@ import time
 from unittest.mock import MagicMock
 
 # Setup Paths
-PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PYTHON_DIR = os.path.join(PROJECT_ROOT, 'python')
 if PYTHON_DIR not in sys.path:
     sys.path.insert(0, PYTHON_DIR)
@@ -38,10 +38,8 @@ def run_terminal_mode():
         print("="*51)
         
         # Register the previously configured web manager and engine reference
-        engine.register_web_manager(ws_manager)
         import services.web_api as web_api
         web_api.syntheta_engine_ref = engine
-    
 
         while True:
             try:

@@ -7,4 +7,5 @@ soundfile
 torch
 kokoro
 python-dotenv
-duckduckgo-search
+ddgs
+brotli>=1.2.0

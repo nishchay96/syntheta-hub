@@ -75,8 +75,8 @@ def perform_hard_restart():
         except Exception as e: logger.error(f"Failed to spawn launcher: {e}")
     else: 
         logger.warning("⚡ Linux Restart: Exiting with Code 42")
-        sys.exit(42)
-    sys.exit(0)
+        os._exit(42)
+    os._exit(0)
 
 def cli_input_loop(comms):
     print("\n--- SYNTHETA CLI ---")
@@ -128,6 +128,12 @@ if __name__ == "__main__":
         librarian = IdleLibrarian(state_manager)
         librarian.start()
         print("✅ Idle Librarian Background Task Started.")
+
+        # 🟢 START THE OPENCLAW RESEARCH WORKER
+        from services.claw_worker import OpenClawWorker
+        claw_thread = threading.Thread(target=OpenClawWorker().run_forever, daemon=True)
+        claw_thread.start()
+        print("✅ OpenClaw Research Worker Started.")
 
     except Exception as e:
         print(f"❌ CRITICAL: Engine Init Failed: {e}")

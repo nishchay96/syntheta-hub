@@ -172,7 +172,7 @@ class ContextAssembler:
     # =========================================================
     # MAIN ENTRY — called by engine._handle_normal_command()
     # =========================================================
-    def build_context_string(self, user_id, user_input=""):
+    def build_context_string(self, user_id, user_input="", recent_queries=None):
         """
         Assembles context block injected into GoldenPacket.
         Three layers:
@@ -190,12 +190,12 @@ class ContextAssembler:
             f"- Date: {now.strftime('%A, %B %d, %Y')}"
         )
 
-        # 2. Recent conversation timeline from event_ledger
-        recent_events = self.db.get_recent_events(limit=5)
-        if recent_events:
+        # 2. Recent conversation timeline from the active session when available.
+        # Falling back to the global ledger here pollutes the prompt with older runs.
+        if recent_queries:
             context_blocks.append(
                 "--- RECENT TIMELINE ---\n"
-                + "\n".join([f"- {e}" for e in recent_events])
+                + "\n".join([f"- {e}" for e in recent_queries[-5:]])
             )
 
         # 3. User profile from SQL core_memory (NightWatchman writes this)

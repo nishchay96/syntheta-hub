@@ -136,6 +136,143 @@
       "strict_aliases": ["reboot", "reboot system", "restart"],
       "payload": { "action": "reboot_host" },
       "reply_template": "Rebooting."
+    },
+    {
+      "comment": "================ 🌐 API DISCOVERY (APISCOUT) ================"
+    },
+    {
+      "id": "LIST_APIS",
+      "type": "sys",
+      "mode": "normal",
+      "phrases": [
+        "list available apis", "what apis do you have", "show all apis",
+        "search for animal apis", "list news apis", "find weather apis",
+        "what sources do you use for weather", "list animal apis", "list some news apis"
+      ],
+      "strict_aliases": ["list apis", "show apis", "find apis", "api list", "list available animal apis", "show some news apis", "find weather apis"],
+      "payload": { "action": "list_apis", "category": "context_aware" },
+      "reply_template": "Checking the API Scout catalog."
+    },
+
+    {
+      "comment": "================ 🗣️ CONVERSATIONAL FAQ (FAST PATH) ================"
+    },
+    {
+      "id": "FAQ_GREETING",
+      "type": "faq",
+      "mode": "normal",
+      "phrases": ["hi there", "hey syntheta", "good morning syntheta", "good evening syntheta", "hello syntheta"],
+      "strict_aliases": [
+        "hi", "hello", "hey", "hey there", "hi there", "hi syntheta", "hello syntheta",
+        "hey syntheta", "good morning", "good evening", "good afternoon", "good night",
+        "good morning syntheta", "good evening syntheta", "howdy", "yo", "what's up",
+        "whats up", "sup"
+      ],
+      "payload": {},
+      "reply_template": "Hey! What can I do for you?"
+    },
+    {
+      "id": "FAQ_FAREWELL",
+      "type": "faq",
+      "mode": "normal",
+      "phrases": ["goodbye", "see you later", "goodnight syntheta", "bye syntheta"],
+      "strict_aliases": [
+        "goodbye", "bye", "see you", "see you later", "goodnight", "bye bye",
+        "bye syntheta", "goodbye syntheta", "see ya", "take care", "later",
+        "good night", "good night syntheta", "i'm done", "that's all"
+      ],
+      "payload": {},
+      "reply_template": "Goodbye! Talk to you later."
+    },
+    {
+      "id": "FAQ_IDENTITY",
+      "type": "faq",
+      "mode": "normal",
+      "phrases": ["who are you", "what is your name", "introduce yourself", "what are you"],
+      "strict_aliases": [
+        "who are you", "what are you", "what's your name", "what is your name",
+        "introduce yourself", "tell me about yourself", "who is syntheta",
+        "what is syntheta", "are you a robot", "are you an ai", "are you real"
+      ],
+      "payload": {},
+      "reply_template": "I'm Syntheta, your personal AI voice assistant. I can control your smart home, answer questions, search the web, and remember things about you."
+    },
+    {
+      "id": "FAQ_CREATOR",
+      "type": "faq",
+      "mode": "normal",
+      "phrases": ["who made you", "who built you", "who is your creator"],
+      "strict_aliases": [
+        "who made you", "who created you", "who built you", "who is your creator",
+        "who designed you", "who developed you", "who made syntheta",
+        "who is your developer", "who is your maker"
+      ],
+      "payload": {},
+      "reply_template": "I was created by Nishchay as a personal AI project. He designed my brain, my voice, and my memory systems."
+    },
+    {
+      "id": "FAQ_CAPABILITIES",
+      "type": "faq",
+      "mode": "normal",
+      "phrases": ["what can you do", "what are your capabilities", "help me", "what do you do"],
+      "strict_aliases": [
+        "what can you do", "what are your capabilities", "what do you do",
+        "how can you help me", "what are your features", "help",
+        "help me", "what are you capable of", "show me what you can do"
+      ],
+      "payload": {},
+      "reply_template": "I can control your lights, fans, and AC. I can answer questions, search the web for live data, and remember personal facts about you. Just ask!"
+    },
+    {
+      "id": "FAQ_THANKS",
+      "type": "faq",
+      "mode": "normal",
+      "phrases": ["thank you syntheta", "thanks a lot", "appreciate it"],
+      "strict_aliases": [
+        "thank you", "thanks", "thanks a lot", "thank you so much",
+        "appreciate it", "thanks syntheta", "thank you syntheta", "cheers",
+        "much appreciated", "thanks a bunch"
+      ],
+      "payload": {},
+      "reply_template": "You're welcome!"
+    },
+    {
+      "id": "FAQ_HOW_ARE_YOU",
+      "type": "faq",
+      "mode": "normal",
+      "phrases": ["how are you doing", "how do you feel", "you okay"],
+      "strict_aliases": [
+        "how are you", "how are you doing", "how do you feel",
+        "how's it going", "you okay", "are you okay",
+        "how are you today", "how is it going"
+      ],
+      "payload": {},
+      "reply_template": "I'm running great! All systems nominal. How can I help you?"
+    },
+    {
+      "id": "FAQ_FEELING",
+      "type": "faq",
+      "mode": "normal",
+      "phrases": ["are you alive", "do you have feelings", "are you sentient"],
+      "strict_aliases": [
+        "are you alive", "do you have feelings", "are you sentient",
+        "do you think", "are you conscious", "do you dream",
+        "are you a person", "are you human"
+      ],
+      "payload": {},
+      "reply_template": "I'm an AI, so I don't have feelings in the way you do. But I'm always here and ready to help!"
+    },
+    {
+      "id": "FAQ_JOKE",
+      "type": "faq",
+      "mode": "normal",
+      "phrases": ["tell me a joke", "say something funny", "make me laugh"],
+      "strict_aliases": [
+        "tell me a joke", "say something funny", "make me laugh",
+        "joke", "tell a joke", "got any jokes", "know any jokes"
+      ],
+      "payload": {},
+      "reply_template": "Why don't scientists trust atoms? Because they make up everything!"
     }
   ],
   

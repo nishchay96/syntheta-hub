@@ -5,30 +5,24 @@ import random
 import urllib.request
 import urllib.parse
 import json
-import xml.etree.ElementTree as ET
-try:
-    from bs4 import BeautifulSoup
-except ImportError:
-    BeautifulSoup = None
+import requests
+from bs4 import BeautifulSoup
 
 from core.database_manager import DatabaseManager
+from nlu.api_scout import APIScout
 
 logger = logging.getLogger("IdleLibrarian")
 
 OLLAMA_EMBED_URL = "http://localhost:11434/api/embeddings"
-NOMIC_MODEL = "nomic-embed-text:v1.5"
-
-RSS_FEEDS = {
-    "NYT": "https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml",
-    "BBC": "http://feeds.bbci.co.uk/news/rss.xml",
-    "TechCrunch": "https://techcrunch.com/feed/"
-}
+OLLAMA_CHAT_URL  = "http://localhost:11434/api/chat"
+NOMIC_MODEL      = "nomic-embed-text:v1.5"
 
 class IdleLibrarian(threading.Thread):
     def __init__(self, engine_state):
         super().__init__(daemon=True)
         self.state = engine_state
         self.db = DatabaseManager()
+        self.scout = APIScout()
         self.running = True
         logger.info("📚 Idle Librarian online. Waiting for engine idle states.")
 
@@ -50,118 +44,167 @@ class IdleLibrarian(threading.Thread):
             logger.error(f"⚠️ Nomic embed failed: {e}")
             return None
 
-    def _clean_html(self, raw_html):
-        if not raw_html: return ""
-        if BeautifulSoup:
-            return BeautifulSoup(raw_html, "html.parser").get_text(separator=" ").strip()
-        else:
-            return raw_html.strip()
+    # 🟢 Facts now extracted via APIScout central utility
 
     def fetch_rss_news(self):
-        logger.info("📚 Librarian: Fetching RSS News...")
-        for source, url in RSS_FEEDS.items():
+        logger.info("📚 Librarian: Harvesting live 'News' APIs via APIScout...")
+        working_apis = self.scout.get_working_apis("News", count=3)
+        
+        for api in working_apis:
             try:
-                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-                with urllib.request.urlopen(req, timeout=10.0) as response:
-                    xml_data = response.read()
-                
-                root = ET.fromstring(xml_data)
-                for item in root.findall('.//item')[:3]:
-                    title = item.find('title').text if item.find('title') is not None else ""
-                    desc = item.find('description').text if item.find('description') is not None else ""
-                    clean_desc = self._clean_html(desc)
+                # Audit pass is 3s, real fetch gets 10s
+                res = requests.get(api["url"], timeout=10.0, headers={'User-Agent': 'Mozilla/5.0'})
+                if res.status_code == 200:
+                    raw_text = res.text
+                    facts = self.scout._extract_facts_from_json(raw_text, "Current News")
                     
-                    full_text = f"{title}. {clean_desc}"
-                    vec = self._embed(full_text)
-                    if vec:
-                        # Store in Hot Cache with 1 hour TTL
-                        key = f"news_{source}_{hash(title)}"
-                        self.db.save_hot_cache("News", key, full_text, vector=vec, ttl_seconds=3600)
+                    if facts:
+                        vec = self._embed(facts)
+                        if vec:
+                            key = f"news_api_{hash(api['url'])}"
+                            self.db.save_hot_cache("News", key, facts, vector=vec, ttl_seconds=3600)
             except Exception as e:
-                logger.warning(f"⚠️ Failed to fetch RSS for {source}: {e}")
+                logger.warning(f"⚠️ Failed to scrape News API {api['name']}: {e}")
             
-            # Rate limiting / Jitter between sources
             time.sleep(random.uniform(2.0, 5.0))
 
     def fetch_local_context(self):
-        logger.info("📚 Librarian: Fetching Local Context (Weather/Crypto Trends)...")
-        # Dummy implementations that would normally hit an API
-        weather_text = "The current weather in Guwahati is 28°C and partly cloudy."
-        crypto_text = "Bitcoin is currently trading at $65,000, up 2% in the last 24 hours."
+        logger.info("📚 Librarian: Tracking User Location & Local Weather...")
+        
+        city = "Guwahati"  # Fallback
+        try:
+            loc_res = requests.get("http://ip-api.com/json/", timeout=5.0)
+            if loc_res.status_code == 200:
+                data = loc_res.json()
+                city = data.get("city", "Guwahati")
+                logger.debug(f"📚 IP-API Located user in: {city}")
+        except Exception as e:
+            logger.warning(f"⚠️ IP-API failed, falling back to Guwahati: {e}")
 
-        vec_w = self._embed(weather_text)
-        if vec_w:
-            self.db.save_hot_cache("Weather", "guwahati_current", weather_text, vector=vec_w, ttl_seconds=1800)
-            
-        vec_c = self._embed(crypto_text)
-        if vec_c:
-            self.db.save_hot_cache("Trends", "btc_current", crypto_text, vector=vec_c, ttl_seconds=900)
+        # Weather API Harvesting
+        weather_apis = self.scout.get_working_apis("Weather", count=2)
+        weather_facts = ""
+        
+        for api in weather_apis:
+            try:
+                url = api["url"]
+                # Some naive public APIs accept /city paths or ?q=city endpoints. 
+                # We'll just append it generically. If it fails, the fallback picks it up.
+                if "?" in url: url += f"&q={city}"
+                else: url += f"?q={city}"
+                
+                res = requests.get(url, timeout=5.0)
+                if res.status_code == 200:
+                    weather_facts = self.scout._extract_facts_from_json(res.text, f"Weather in {city}")
+                    if weather_facts: break # Got it
+            except Exception:
+                continue
+
+        if not weather_facts:
+            # Final web scraper fallback if 48-hr GitHub APIs universally fail
+            try:
+                try:
+                    from ddgs import DDGS
+                except ImportError:
+                    from duckduckgo_search import DDGS
+                with DDGS() as ddgs:
+                    results = list(
+                        ddgs.text(
+                            f"current weather in {city}",
+                            region="us-en",
+                            safesearch="moderate",
+                            backend="google,duckduckgo,brave,yahoo",
+                            max_results=1,
+                        )
+                    )
+                    if results:
+                        weather_facts = results[0].get("body", "")
+            except Exception as e:
+                logger.warning(f"⚠️ DuckDuckGo Weather Fallback failed: {e}")
+                weather_facts = f"The current weather in {city} is mild."
+
+        if weather_facts:
+            vec_w = self._embed(weather_facts)
+            if vec_w:
+                self.db.save_hot_cache("Weather", f"{city}_current", weather_facts, vector=vec_w, ttl_seconds=1800)
 
     def fetch_bucket_context(self):
         logger.info("📚 Librarian: Fetching Personalized Bucket Context...")
         buckets = self.db.get_all_user_buckets()
         if not buckets:
-            logger.info("📚 Librarian: No user profile buckets found.")
             return
 
         for bucket in buckets:
-            logger.info(f"📚 Librarian: Fetching context for profile bucket '{bucket}'...")
-            try:
-                query = f"{bucket} latest news trends overview"
-                url = f"https://api.duckduckgo.com/?q={urllib.parse.quote(query)}&format=json&no_html=1&skip_disambig=1"
-                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-                with urllib.request.urlopen(req, timeout=10.0) as response:
-                    data = json.loads(response.read().decode('utf-8'))
-                
-                texts = []
-                if data.get("AbstractText"):
-                    texts.append(f"Context for {bucket}: {data['AbstractText']}")
-                
-                for topic in data.get("RelatedTopics", [])[:3]:
-                    if isinstance(topic, dict) and topic.get("Text"):
-                        texts.append(f"{topic['Text']}")
-                
-                for text in texts:
-                    vec = self._embed(text)
-                    if vec:
-                        # Store in Hot Cache with 24-hour TTL for deep profiling
-                        key = f"profile_{bucket}_{hash(text)}"
-                        self.db.save_hot_cache(f"Profile_{bucket}", key, text, vector=vec, ttl_seconds=86400)
-            except Exception as e:
-                logger.warning(f"⚠️ Failed to fetch context for bucket {bucket}: {e}")
+            logger.info(f"📚 Librarian: Contextualizing '{bucket}'...")
             
-            # Rate limiting / Jitter
+            # Map Bucket to GitHub APIScout Category
+            gh_cat = self.scout.match_bucket_to_category(bucket)
+            if gh_cat:
+                logger.info(f"📚 APIScout Matched '{bucket}' -> '{gh_cat}'")
+                api_list = self.scout.get_working_apis(gh_cat, count=3)
+            else:
+                api_list = []
+
+            facts = ""
+            for api in api_list:
+                try:
+                    res = requests.get(api["url"], timeout=5.0, headers={'User-Agent': 'Mozilla/5.0'})
+                    if res.status_code == 200:
+                        facts = self.scout._extract_facts_from_json(res.text, bucket)
+                        if facts: break
+                except Exception:
+                    continue
+                    
+            # API Backup -> DDGS Fallback
+            if not facts:
+                logger.info(f"📚 Falling back to DuckDuckGo for bucket '{bucket}'")
+                try:
+                    try:
+                        from ddgs import DDGS
+                    except ImportError:
+                        from duckduckgo_search import DDGS
+                    with DDGS() as ddgs:
+                        results = list(
+                            ddgs.text(
+                                f"latest {bucket} news trends",
+                                region="us-en",
+                                safesearch="moderate",
+                                backend="google,duckduckgo,brave,yahoo",
+                                max_results=2,
+                            )
+                        )
+                        for r in results:
+                            facts += r.get("body", "") + ". "
+                except Exception as e:
+                    logger.warning(f"⚠️ DuckDuckGo Bucket Fallback failed: {e}")
+
+            if facts:
+                vec = self._embed(facts)
+                if vec:
+                    key = f"profile_{bucket}_{hash(facts)}"
+                    self.db.save_hot_cache(f"Profile_{bucket}", key, facts[:500], vector=vec, ttl_seconds=86400)
+            
             time.sleep(random.uniform(5.0, 8.0))
 
     def is_engine_idle(self):
-        # Engine is idle if all sessions are IDLE or LISTENING and no conversation active
         modes = self.state.session_mode.values()
-        if not modes: return True # No sessions yet
+        if not modes: return True
         return all(m in ["IDLE", "LISTENING"] for m in modes) and not getattr(self.state, "is_conversation", False)
 
     def run(self):
-        # Initial wait before starting cycles
         time.sleep(30)
-        
         while self.running:
             if self.is_engine_idle():
                 logger.info("📚 Engine is IDLE. Librarian starting maintenance cycle.")
                 self.db.clean_expired_cache()
-                
                 self.fetch_rss_news()
                 time.sleep(random.uniform(5.0, 10.0))
-                
                 self.fetch_bucket_context()
                 time.sleep(random.uniform(5.0, 10.0))
-                
                 self.fetch_local_context()
-                
                 logger.info("📚 Librarian maintenance cycle complete.")
-            else:
-                logger.debug("📚 Engine active. Librarian waiting.")
             
-            # Wait 30-45 minutes (jitter) before next check
             sleep_time = random.uniform(1800, 2700)
             target = time.time() + sleep_time
             while time.time() < target and self.running:
-                time.sleep(10) # Wake briefly to check shutdown flag
+                time.sleep(10)

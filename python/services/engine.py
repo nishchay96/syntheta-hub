@@ -102,6 +102,7 @@ class SynthetaEngine:
         self.nightwatchman.capture.router = self.librarian
         
         self.api_scout = APIScout()
+        self.librarian.api_scout = self.api_scout
 
         self.web_injector = WebUIInjector(self)
         self.web_injector.start()
@@ -136,6 +137,41 @@ class SynthetaEngine:
         threading.Thread(target=self.llm.pre_load,       daemon=True).start()
         
         logger.info("🟢 ENGINE READY.")
+
+    def _extract_requested_count(self, text: str) -> int | None:
+        if not text:
+            return None
+        match = re.search(r"\btop\s+(\d{1,2})\b", text.lower())
+        if match:
+            return int(match.group(1))
+        match = re.search(r"\b(\d{1,2})\s+(?:headlines|news items|items)\b", text.lower())
+        if match:
+            return int(match.group(1))
+        return None
+
+    def _direct_counted_live_reply(self, text: str, packet: dict) -> str | None:
+        requested = self._extract_requested_count(text)
+        memory_tank = packet.get("memory_tank") or ""
+        route = packet.get("route_taken")
+        if not requested or route != "general_web_search" or "--- LIVE WEB" not in memory_tank:
+            return None
+
+        bullets = []
+        for line in memory_tank.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("• ") and not stripped.startswith("• Source:"):
+                bullets.append(stripped[2:].strip())
+        if len(bullets) < requested:
+            return None
+
+        numbered = [f"{i}. {item}" for i, item in enumerate(bullets[:requested], start=1)]
+        return "Here are the top {} items for today: {}".format(requested, " ".join(numbered))
+
+    def _direct_live_failure_reply(self, text: str, packet: dict) -> str | None:
+        if not packet.get("live_lookup_failed"):
+            return None
+        query = packet.get("failed_web_query") or text
+        return f"I couldn't fetch live current data for '{query}' right now because web retrieval is unavailable. Please try again later."
 
     def register_comms(self, comms_instance):
         self.comms = comms_instance
@@ -221,7 +257,7 @@ class SynthetaEngine:
                 data=json.dumps(payload).encode('utf-8'),
                 headers={'Content-Type': 'application/json'}
             )
-            with urllib.request.urlopen(req, timeout=2.0) as res:
+            with urllib.request.urlopen(req, timeout=5.0) as res:
                 return json.loads(res.read().decode('utf-8'))['embedding']
         except Exception as e:
             logger.error(f"⚠️ Vector Gen Failed: {e}")
@@ -479,6 +515,66 @@ class SynthetaEngine:
         msg = f"Welcome back, {username}. I have loaded your profile." if not is_new else f"I've created a new profile for you, {username}. How can I help today?"
         self._speak(sat_id, msg, force_listen=False)
 
+    def _extract_identity_candidate(self, text: str) -> str | None:
+        clean_text = re.sub(r"\s+", " ", text.strip())
+        patterns = [
+            r"^(?:i am|i'm|my name is|call me)\s+([a-zA-Z][a-zA-Z' -]{0,39})$",
+            r"^(?:this is)\s+([a-zA-Z][a-zA-Z' -]{0,39})$",
+        ]
+        for pattern in patterns:
+            match = re.match(pattern, clean_text, flags=re.IGNORECASE)
+            if match:
+                return match.group(1).strip()
+        return None
+
+    def _looks_like_person_name(self, candidate: str) -> bool:
+        if not candidate:
+            return False
+        normalized = re.sub(r"\s+", " ", candidate.strip())
+        if not re.fullmatch(r"[A-Za-z][A-Za-z' -]{0,39}", normalized):
+            return False
+
+        stopwords = {
+            "a", "an", "the", "and", "or", "but", "if", "then", "than", "so",
+            "hello", "hi", "hey", "thanks", "thank", "sorry", "please",
+            "weather", "news", "music", "help", "time", "date", "update",
+            "search", "find", "show", "play", "stop", "start", "open", "close",
+            "turn", "set", "get", "list", "check", "tell", "explain", "define",
+            "describe", "translate", "calculate", "what", "who", "how", "when",
+            "where", "why", "which", "today", "tomorrow", "yesterday", "now",
+            "price", "cost", "bitcoin", "stock", "market", "data", "movie",
+            "movies", "film", "song", "story", "recipe", "fact", "quote",
+            "yes", "no", "ok", "okay", "sure", "cancel", "reset", "should",
+            "could", "would", "can", "will", "do", "does", "did", "am", "is",
+            "are", "was", "were", "be", "being", "been", "shouldnt", "dont",
+            "nothing", "something", "anything", "everything", "guest", "profile",
+        }
+        lowered_tokens = [
+            token for token in re.split(r"[ -]+", normalized.lower()) if token
+        ]
+        if not lowered_tokens or len(lowered_tokens) > 3:
+            return False
+        if any(token in stopwords for token in lowered_tokens):
+            return False
+        if all(len(token) == 1 for token in lowered_tokens):
+            return False
+        return True
+
+    def _canonicalize_profile_name(self, candidate: str) -> str:
+        return " ".join(part.capitalize() for part in re.split(r"\s+", candidate.strip()) if part)
+
+    def _queue_profile_creation(self, sat_id: int, candidate_name: str):
+        self.state.set_pending_identity(sat_id, candidate_name)
+        current_user = self.state.get_active_user(sat_id)
+        if current_user != "Guest":
+            self._speak(
+                sat_id,
+                f"I don't have a profile for {candidate_name} yet. Should I create one? "
+                f"I'll keep {current_user.capitalize()}'s profile loaded until you confirm.",
+            )
+        else:
+            self._speak(sat_id, f"I don't have a profile for {candidate_name} yet. Should I create one for you?")
+
     # =========================================
     # LOGIC HANDLER — THE BRAIN
     # =========================================
@@ -489,14 +585,20 @@ class SynthetaEngine:
 
         # 🟢 IDENTITY LOGIC REFINEMENT (Load vs Create)
         clean_text = text.lower().strip()
-        
+        active_user = self.state.get_active_user(sat_id)
+
         # 1. CREATE INTENT (Explicit)
-        create_match = re.search(r"(create|make|setup)\s+(a\s+)?(profile|account)\s+(for|of)\s+([a-zA-Z]+)", clean_text)
-        
+        create_match = re.search(
+            r"(create|make|setup)\s+(?:a\s+)?(?:profile|account)\s+(?:for|of)\s+([a-zA-Z][a-zA-Z' -]{0,39})",
+            text,
+            flags=re.IGNORECASE,
+        )
+
         # 2. LOAD INTENT (Implicit identification)
-        load_match = re.match(r"^(i am|i'm|my name is|call me)\s+([a-zA-Z]+)", clean_text)
-        
+        load_name = self._extract_identity_candidate(text)
+
         # 3. Confirmation State (Wait for Yes/No)
+        self.state._init_identity_state(sat_id)
         confirm_state = self.state.identity_state.get(sat_id, {})
         is_waiting_confirm = confirm_state.get("is_waiting_confirm", False)
         pending_name = confirm_state.get("pending_name")
@@ -504,31 +606,38 @@ class SynthetaEngine:
 
         # --- CASE A: Explicit Creation ---
         if create_match:
-            new_name = create_match.group(5).capitalize()
+            raw_name = create_match.group(2).strip()
+            if not self._looks_like_person_name(raw_name):
+                self._speak(sat_id, "That doesn't sound like a person's name. Tell me the name you want on the profile.")
+                return
+            new_name = self._canonicalize_profile_name(raw_name)
             self._activate_profile(sat_id, new_name, is_new=True)
             return
 
         # --- CASE B: Loading Identification ---
-        if load_match:
-            id_name = load_match.group(2).capitalize()
+        if load_name:
+            if not self._looks_like_person_name(load_name):
+                self._speak(sat_id, "I need an actual person name before I load or create a profile.")
+                return
+            id_name = self._canonicalize_profile_name(load_name)
             if self.nightwatchman.capture.user_exists(id_name):
                 self._activate_profile(sat_id, id_name, is_new=False)
             else:
-                self.state.identity_state[sat_id] = {
-                    "is_waiting_confirm": True,
-                    "pending_name": id_name
-                }
-                self._speak(sat_id, f"I don't have a profile for {id_name} yet. Should I create one for you?")
+                self._queue_profile_creation(sat_id, id_name)
             return
 
         # --- CASE D: Confirmation Response ---
         if is_waiting_confirm and pending_name:
             if any(w in clean_text for w in ["yes", "yeah", "sure", "ok", "create"]):
                 self._activate_profile(sat_id, pending_name, is_new=True)
-                self.state.identity_state[sat_id] = {} # Clear state
+                self.state.clear_pending_identity(sat_id)
             elif any(w in clean_text for w in ["no", "dont", "don't", "stop"]):
-                self._speak(sat_id, "No problem. I'll keep you as Guest for now.")
-                self.state.identity_state[sat_id] = {} # Clear state
+                fallback_user = self.state.get_active_user(sat_id)
+                if fallback_user != "Guest":
+                    self._speak(sat_id, f"No problem. I'll keep {fallback_user.capitalize()}'s profile loaded.")
+                else:
+                    self._speak(sat_id, "No problem. I'll keep you as Guest for now.")
+                self.state.clear_pending_identity(sat_id)
             return
 
         # 🟢 UNIFIED INTENT PROCESSING: Rely on PiManager
@@ -545,22 +654,22 @@ class SynthetaEngine:
             if intent and intent != "unknown":
                 # Clear identity prompt if we executed a command instead of answering the name
                 if just_asked or is_waiting_confirm:
-                    self.state.identity_state[sat_id] = {}
+                    self.state._init_identity_state(sat_id)
                 self._execute_plan(sat_id, plan, telemetry); return
 
         # --- CASE C: Prompted Response (Simplified "Nishchay") ---
         if just_asked and len(clean_text.split()) <= 2:
-            # If they just say "Nishchay" or "Nishchay here"
-            name = clean_text.replace("here", "").strip().split()[0].capitalize()
-            if self.nightwatchman.capture.user_exists(name):
-                self._activate_profile(sat_id, name, is_new=False)
+            candidate = clean_text.replace("here", "").strip().split()[0]
+            if not self._looks_like_person_name(candidate):
+                self.state.clear_pending_identity(sat_id)
+                # Fall through to normal pipeline instead of treating as name
             else:
-                self.state.identity_state[sat_id] = {
-                    "is_waiting_confirm": True,
-                    "pending_name": name
-                }
-                self._speak(sat_id, f"I don't have a profile for {name} yet. Should I create one?")
-            return
+                name = self._canonicalize_profile_name(candidate)
+                if self.nightwatchman.capture.user_exists(name):
+                    self._activate_profile(sat_id, name, is_new=False)
+                else:
+                    self._queue_profile_creation(sat_id, name)
+                return
 
         # --- NEW DECISION TREE (The "Doors") ---
         # Door 1: Reflex Catalog (Handled above by pi.process_query)
@@ -570,20 +679,14 @@ class SynthetaEngine:
         
         if q_vec is not None:
             # Door 2: Hot Cache (Idle Librarian Data)
-            hot_match = self.db.get_hot_cache_match(q_vec, threshold=0.85)
+            hot_match = self.db.get_hot_cache_match(q_vec, threshold=0.70)
             if hot_match:
                 logger.info(f"⚡ FAST PATH: Hot Cache matched '{text}' < 50ms")
                 self._speak(sat_id, hot_match, force_listen=False, telemetry=telemetry)
                 return
             
-            # Door 3: API Scout
-            api_start = time.perf_counter()
-            api_match = self.api_scout.lookup_api(text, query_vector=q_vec, threshold=0.85)
-            if api_match:
-                api_ms = (time.perf_counter() - api_start) * 1000
-                logger.info(f"⚡ FAST PATH: API Scout matched '{text}' in {api_ms:.1f}ms")
-                self._speak(sat_id, api_match, force_listen=False, telemetry=telemetry)
-                return
+        # Door 3: API Scout — handled inside router's web route (enrich_packet)
+        # When router decides "web", it checks APIScout first → if no match → SearxNG/DDG
                 
         # Door 4: Deep Web / General Routing (Proceeds Below)
 
@@ -613,6 +716,7 @@ class SynthetaEngine:
 
         # 🟢 Retrieve active user FIRST, so DB and NightWatchman can use it
         active_user = self.state.get_active_user(sat_id)
+        self.api_scout.current_user = active_user
 
         sql_memory = ""
         if q_vec is not None:
@@ -622,10 +726,20 @@ class SynthetaEngine:
         # Point the working memory capture to the correct user vault
         self.nightwatchman.capture.set_user(active_user, sat_id)
 
-        # 🟢 CONSOLIDATED CONTEXT: Use build_context_string instead of capture.get_context
-        memory_ctx = self.assembler.build_context_string(active_user, text)
-
         self.state.update_context(sat_id, text, new_entities={})
+
+        recent_queries = [
+            turn.get("content", "")
+            for turn in self.state.get_recent_context(sat_id)
+            if turn.get("role") == "user" and turn.get("content")
+        ]
+
+        # 🟢 CONSOLIDATED CONTEXT: build against the active session timeline
+        memory_ctx = self.assembler.build_context_string(
+            active_user,
+            text,
+            recent_queries=recent_queries,
+        )
 
         if is_silent:
             logger.info(f"🔕 Silent chunk saved to history: '{text}'")
@@ -639,8 +753,12 @@ class SynthetaEngine:
             memory_context=memory_ctx
         )
 
+
         packet = self.librarian.enrich_packet(packet)
         resolved_input = packet.get('input', text)
+
+        if packet.get('route_taken') == "general_web_search" and not packet.get('needs_memory'):
+            packet['memory_context'] = ""
 
         if packet.get('web_data'):
             packet['memory_tank'] = packet['web_data']
@@ -660,7 +778,25 @@ class SynthetaEngine:
         print("=" * 60 + "\n")
 
         try:
-            llm_response_dict = self.llm.generate(packet)
+            direct_live_failure = self._direct_live_failure_reply(resolved_input, packet)
+            if direct_live_failure:
+                llm_response_dict = {
+                    "response": direct_live_failure,
+                    "active_subject": "live_lookup_failed",
+                    "is_action": False,
+                    "execute": None,
+                }
+            else:
+                direct_live_reply = self._direct_counted_live_reply(resolved_input, packet)
+                if direct_live_reply:
+                    llm_response_dict = {
+                        "response": direct_live_reply,
+                        "active_subject": "live_list",
+                        "is_action": False,
+                        "execute": None,
+                    }
+                else:
+                    llm_response_dict = self.llm.generate(packet)
 
             if self.state.session_start_time != current_session_id:
                 logger.warning("🚫 Barge-in detected. Aborting stale response.")
@@ -791,6 +927,8 @@ class SynthetaEngine:
                     base_speech = f"Today is {datetime.now().strftime('%A, %B %d, %Y')}."
                 elif action_name == "stop_audio":
                     self._close_session(sat_id); return
+                elif action_name == "list_apis":
+                    self._handle_list_apis(execute_payload, sat_id, current_text=plan.get("raw_input")); return
             elif "domain" in execute_payload and "service" in execute_payload:
                 domain        = execute_payload["domain"]
                 service       = execute_payload["service"]
@@ -874,6 +1012,28 @@ class SynthetaEngine:
         self.state.deaf_until = time.time() + duration + 0.2
         self.pending_force_listen[sat_id] = force_listen
         self.emitter.emit("play_file", sat_id, {"filepath": path})
+
+    def _handle_list_apis(self, payload, sat_id, current_text=""):
+        """Fetches and formats a list of working APIs for a category."""
+        target_cat = payload.get("category")
+        if target_cat == "context_aware" and current_text:
+            # Try to extract category from text (e.g. "animal" from "list animal apis")
+            target_cat = self.api_scout.match_bucket_to_category(current_text)
+            
+        if not target_cat:
+            self._speak(sat_id, "I couldn't identify which category of APIs you're looking for. Could you be more specific?")
+            return
+
+        apis = self.api_scout.get_working_apis(target_cat, count=3)
+        if not apis:
+            self._speak(sat_id, f"I found the '{target_cat}' category, but none of the APIs are currently responding. I can try a web search instead if you'd like.")
+            return
+
+        reply = f"Here are some working APIs for {target_cat}:\n"
+        for i, api in enumerate(apis, 1):
+            reply += f"{i}. {api['name']}: {api['url']}\n"
+        
+        self._speak(sat_id, reply, force_listen=False)
 
     # =========================================
     # LATENCY REPORT

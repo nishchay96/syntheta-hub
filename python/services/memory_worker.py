@@ -70,7 +70,26 @@ NODE_STOPWORDS = {
     "thanks", "thank", "please", "sorry", "what", "how", "why",
     "when", "where", "who", "which", "this", "that", "these",
     "there", "here", "now", "then", "just", "also", "well",
+    "none", "something", "anything", "everything", "speaker",
 }
+
+PROFILE_BUCKET_WHITELIST = {"People", "Devices", "Work", "Opinions", "Health", "Places", "Plans"}
+RELATION_TERMS = {
+    "wife", "husband", "mother", "father", "friend", "brother", "sister",
+    "son", "daughter", "manager", "boss", "colleague", "coworker", "roommate",
+}
+NON_DURABLE_PATTERNS = [
+    r"^\s*(what|who|when|where|why|how)\b",
+    r"\b(current date|today'?s date|current time|what time)\b",
+    r"\b(latest|breaking|news|headline|score|price|weather|president|prime minister)\b",
+    r"\b(ai is not capable|i am not capable|check .* website)\b",
+]
+LOW_SIGNAL_FACT_PATTERNS = [
+    r"^\s*none\s*$",
+    r"^\s*interest in something\s*$",
+    r"^\s*is a person\s*$",
+    r"^\s*ai assistant\s*$",
+]
 
 # Transient physical-state patterns — never store these as permanent facts
 TRANSIENT_PATTERNS = [
@@ -178,6 +197,70 @@ class RealtimeMemoryCapture:
                 return True
         return False
 
+    def _is_profile_worthy(self, text: str) -> bool:
+        t = re.sub(r"\s+", " ", text.strip().lower())
+        if not t:
+            return False
+        if any(re.search(pattern, t) for pattern in NON_DURABLE_PATTERNS):
+            return False
+        personal_signals = [
+            "my ", "i have", "i own", "i use", "i like", "i dislike", "i hate",
+            "i love", "i prefer", "i work", "i live", "i stay", "i am ",
+            "i'm ", "my name is", "call me", "for me",
+        ]
+        if any(signal in t for signal in personal_signals):
+            return True
+        if any(re.search(rf"\b{term}\b", t) for term in RELATION_TERMS):
+            return True
+        return False
+
+    def _is_low_signal_summary(self, summary: str) -> bool:
+        normalized = re.sub(r"\s+", " ", summary.strip().lower())
+        if not normalized:
+            return True
+        if any(re.search(pattern, normalized) for pattern in LOW_SIGNAL_FACT_PATTERNS):
+            return True
+        if len(normalized.split()) < 2:
+            return True
+        return False
+
+    def _sanitize_merged_nodes(self, merged: dict, bucket_name: str) -> dict:
+        cleaned = {}
+        for node_name, attrs in (merged or {}).items():
+            node_norm = node_name.strip()
+            node_low = node_norm.lower().replace("_", " ")
+            if not node_norm:
+                continue
+            if node_low in NODE_STOPWORDS:
+                continue
+            if any(re.search(pattern, node_low) for pattern in LOW_SIGNAL_FACT_PATTERNS):
+                continue
+            if bucket_name == "People" and node_low in {"self", "speaker"}:
+                continue
+            if bucket_name == "Devices" and node_low in {"fire", "current date", "date", "speaker"}:
+                continue
+
+            if isinstance(attrs, dict):
+                filtered_attrs = {}
+                for key, value in attrs.items():
+                    key_norm = str(key).strip()
+                    val_norm = str(value).strip()
+                    if not key_norm or not val_norm:
+                        continue
+                    compact_key = key_norm.lower().replace(" ", "")
+                    if compact_key in STRUCTURAL_KEYS:
+                        continue
+                    if any(re.search(pattern, val_norm.lower()) for pattern in LOW_SIGNAL_FACT_PATTERNS):
+                        continue
+                    if any(re.search(pattern, val_norm.lower()) for pattern in NON_DURABLE_PATTERNS):
+                        continue
+                    filtered_attrs[key_norm] = val_norm
+                if filtered_attrs:
+                    cleaned[node_norm] = filtered_attrs
+            elif str(attrs).strip():
+                cleaned[node_norm] = attrs
+        return cleaned
+
     # ----------------------------------------------------------
     # BACKGROUND PIPELINE — full 4-stage pipeline from tester
     # ----------------------------------------------------------
@@ -185,6 +268,9 @@ class RealtimeMemoryCapture:
         logger.info(f"🧠 [Capture] Starting extraction thread for Sat {sat_id}...")
         user_dir = self._get_user_dir(sat_id)
         try:
+            if not self._is_profile_worthy(user_text):
+                logger.debug(f"🧠 [Capture] Skipping non-durable fact: '{user_text}'")
+                return
             # Pre-process: resolve pronouns using last_entity context
             processed_text = self._preprocess(user_text, sat_id)
             logger.debug(f"🧠 [Capture] Preprocessed: '{user_text}' -> '{processed_text}'")
@@ -300,6 +386,12 @@ Output raw JSON only.
                     continue
                 
                 if not summary:
+                    continue
+                if bucket not in PROFILE_BUCKET_WHITELIST:
+                    logger.debug(f"🧠 [Triage] Skipping non-profile bucket '{bucket}'")
+                    continue
+                if self._is_low_signal_summary(summary):
+                    logger.debug(f"🧠 [Triage] Skipping low-signal summary '{summary}'")
                     continue
                 
                 bucket = self._normalize_bucket(bucket, existing)
@@ -583,6 +675,10 @@ Output the COMPLETE updated nodes dict. Raw JSON only."""
         # Stage 3: validate
         merged = self._validate_nodes(
             merged, fact_summary, snapshot, bucket_name)
+        merged = self._sanitize_merged_nodes(merged, bucket_name)
+        if not merged:
+            logger.info(f"🧠 [Ledger] Sanitizer rejected weak memory for bucket {bucket_name}")
+            return
 
         # Stage 4: guard — restore any nodes dropped by LLM
         for node, attrs in snapshot.items():
@@ -1007,4 +1103,3 @@ class MemoryWorker:
         else:
             with open(filepath, 'w', encoding='utf-8') as f:
                 f.write(f"# Memory: {safe}\n\n{entry}")
-

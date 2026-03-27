@@ -74,6 +74,32 @@ def check_terminal_installed():
         if shutil.which(t): return t
     return None
 
+def can_use_gui_terminal():
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+def launch_audio_bridge(go_bin, clean_env, term_cmd):
+    if term_cmd and can_use_gui_terminal():
+        log(f" - Spawning in {term_cmd}...", "INFO")
+        try:
+            if "gnome-terminal" in term_cmd:
+                proc = subprocess.Popen([term_cmd, "--", go_bin], cwd=GO_DIR, env=clean_env)
+            elif "xfce4-terminal" in term_cmd:
+                proc = subprocess.Popen([term_cmd, "-e", go_bin], cwd=GO_DIR, env=clean_env)
+            else:
+                proc = subprocess.Popen([term_cmd, "-e", go_bin], cwd=GO_DIR, env=clean_env)
+
+            time.sleep(0.5)
+            if proc.poll() is None:
+                return
+
+            log(f"GUI terminal exited immediately with code {proc.returncode}. Falling back to headless launch.", "WARN")
+        except Exception as e:
+            log(f"GUI terminal launch failed: {e}. Falling back to headless launch.", "WARN")
+    elif term_cmd:
+        log(" - GUI terminal detected but no graphical session is available. Falling back to headless launch.", "WARN")
+
+    subprocess.Popen([go_bin], cwd=GO_DIR, env=clean_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
 def check_go_installed():
     return shutil.which("go") is not None
 
@@ -82,16 +108,22 @@ def check_go_installed():
 # ==============================================================================
 def kill_process_on_port(port):
     try:
-        pid = subprocess.check_output(["lsof", "-t", "-i", f":{port}"], stderr=subprocess.DEVNULL).strip().decode()
-        if pid:
-            log(f" - Port {port} is busy. Killing PID {pid}...", "WARN")
-            os.kill(int(pid), signal.SIGKILL)
+        pids = subprocess.check_output(["lsof", "-t", "-i", f":{port}"], stderr=subprocess.DEVNULL).strip().decode()
+        if pids:
+            for pid in pids.split('\n'):
+                pid = pid.strip()
+                if pid:
+                    log(f" - Port {port} is busy. Killing PID {pid}...", "WARN")
+                    os.kill(int(pid), signal.SIGKILL)
     except:
         pass
 
-def ensure_clean_slate():
+def ensure_clean_slate(internal_restart=False):
     log("Cleaning ports...", "INFO")
     for port in TARGET_PORTS:
+        # Skip Web UI/Gateway ports during internal backend restarts
+        if internal_restart and port in [8000, 8001]:
+            continue
         kill_process_on_port(port)
         
     db_path = os.path.join(ROOT_DIR, "assets", "database", "syntheta_ledger.db")
@@ -178,40 +210,38 @@ def main():
         log("❌ Go Compilation Failed. Check go/cmd/main.go", "ERROR")
         sys.exit(1)
 
+    # 1. PRE-FLIGHT CLEANUP (Full)
+    ensure_clean_slate(internal_restart=False)
+    ensure_ollama_ready()
+
+    # 2. PERSISTENT WEB GATEWAY (Port 8001)
+    # This process survives Brain restarts (return code 42)
+    log("Launching Persistent Web Gateway on Port 8001...", "BOOT")
+    gateway_log = open(os.path.join(LOG_DIR, "gateway.log"), "a", encoding="utf-8")
+    gateway_process = subprocess.Popen(
+        [VENV_PYTHON, "-m", "uvicorn", "python.web_gateway:app", "--host", "0.0.0.0", "--port", "8001", "--no-access-log"],
+        cwd=ROOT_DIR,
+        stdout=gateway_log,
+        stderr=gateway_log
+    )
+
     while True:
-        gateway_process = None
-        # Open log file in append mode
+        # Open log file for brain in append mode
         log_file = open(LOG_FILE_PATH, "a", encoding="utf-8")
-        log_file.write(f"\n\n--- SYNTHETA SOVEREIGN BOOTLOADER (V3.0) [{time.strftime('%Y-%m-%d %H:%M:%S')}] ---\n")
+        log_file.write(f"\n\n--- SYNTHETA SOVEREIGN BRAIN SESSION [{time.strftime('%Y-%m-%d %H:%M:%S')}] ---\n")
         log_file.flush()
 
         try:
-            ensure_clean_slate()
+            # Only clean backend ports during internal restart
+            ensure_clean_slate(internal_restart=True)
 
-            # 1. LAUNCH WEB GATEWAY (Strictly Port 8001)
-            log("Launching Web Gateway on Port 8001...", "BOOT")
-            gateway_process = subprocess.Popen(
-                [VENV_PYTHON, "-m", "uvicorn", "python.web_gateway:app", "--host", "0.0.0.0", "--port", "8001"],
-                cwd=ROOT_DIR,
-                stdout=log_file,
-                stderr=log_file
-            )
 
             # 2. LAUNCH GO BRIDGE
             log("Launching Audio Bridge (Go)...", "BOOT")
             go_bin = os.path.join(GO_DIR, "syntheta-hub")
             clean_env = get_sanitized_env()
 
-            if term_cmd:
-                log(f" - Spawning in {term_cmd}...", "INFO")
-                if "gnome-terminal" in term_cmd:
-                    subprocess.Popen([term_cmd, "--", go_bin], cwd=GO_DIR, env=clean_env)
-                elif "xfce4-terminal" in term_cmd:
-                    subprocess.Popen([term_cmd, "-e", go_bin], cwd=GO_DIR, env=clean_env)
-                else:
-                    subprocess.Popen([term_cmd, "-e", go_bin], cwd=GO_DIR, env=clean_env)
-            else:
-                subprocess.Popen([go_bin], cwd=GO_DIR, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            launch_audio_bridge(go_bin, clean_env, term_cmd)
 
             time.sleep(2) 
 
@@ -230,29 +260,25 @@ def main():
 
             # 4. EXIT HANDLING
             if brain_process.returncode == 42:
-                log("🔄 Restart requested...", "BOOT")
-                if gateway_process:
-                    gateway_process.terminate()
+                log("🔄 Brain Restart requested (Gateway persists)...", "BOOT")
                 time.sleep(1)
                 continue
             else:
                 log("Shutting down.", "INFO")
-                if gateway_process:
-                    gateway_process.terminate()
                 break
 
         except KeyboardInterrupt:
             print("\n")
             log("Manual Interrupt.", "WARN")
-            if gateway_process:
-                gateway_process.terminate()
             break
         except Exception as e:
             log(f"Launcher Error: {e}", "ERROR")
-            if gateway_process:
-                gateway_process.terminate()
             break
-    ensure_clean_slate()
+
+    # FINAL CLEANUP
+    if gateway_process:
+        gateway_process.terminate()
+    ensure_clean_slate(internal_restart=False)
     print("Goodbye.")
 
 if __name__ == "__main__":

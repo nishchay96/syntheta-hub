@@ -60,7 +60,10 @@ class SemanticBrain:
                 # Register ID for SLM Router Lookup
                 self.id_to_cmd_map[cmd["id"]] = cmd
 
-                for alias in cmd.get("strict_aliases", []):
+                # Index both strict_aliases AND phrases
+                triggers = cmd.get("strict_aliases", []) + cmd.get("phrases", [])
+                
+                for alias in triggers:
                     clean_alias = alias.lower().strip()
                     self.strict_alias_map[clean_alias] = cmd
                     
@@ -139,3 +142,34 @@ class SemanticBrain:
         # Strip common Whisper hallucinations
         t = re.sub(r'(?i)^(you|thank you|thanks|start|stop|subtitles).*', '', t) if len(t) < 5 else t
         return t
+
+    def compare_against_list(self, text, phrase_list):
+        """
+        Calculates a confidence score (0.0 to 1.0) for the input against a list of phrases.
+        Uses word-set intersection for robustness.
+        """
+        clean_input = self.clean_input(text).lower()
+        input_words = set(clean_input.split())
+        if not input_words:
+            return 0.0, None
+            
+        best_score = 0.0
+        best_phrase = None
+        
+        for phrase in phrase_list:
+            phrase_words = set(phrase.lower().split())
+            if not phrase_words: continue
+            
+            # Intersection score
+            intersect = input_words.intersection(phrase_words)
+            if not intersect:
+                score = 0.0
+            else:
+                # Jaccard-like or overlap ratio
+                score = len(intersect) / len(phrase_words)
+                
+            if score > best_score:
+                best_score = score
+                best_phrase = phrase
+                
+        return best_score, best_phrase

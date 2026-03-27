@@ -61,17 +61,48 @@ class EngineState:
         
         # 🟢 NEW: Identity Tracker for Multi-User Households
         self.identity_state = {} # {sat_id: {"active_user": "Guest", "loaded_date": "YYYY-MM-DD", "has_prompted": False}}
+        self.identity_state_path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "../../assets/system/identity_state.json")
+        )
+        os.makedirs(os.path.dirname(self.identity_state_path), exist_ok=True)
+        self._load_identity_state()
 
     # ----------------------------------------------------------
     # IDENTITY & PROFILE MANAGEMENT
     # ----------------------------------------------------------
+    def _load_identity_state(self):
+        if not os.path.exists(self.identity_state_path):
+            return
+        try:
+            with open(self.identity_state_path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            if isinstance(raw, dict):
+                self.identity_state = {
+                    int(sat_id): value for sat_id, value in raw.items()
+                    if isinstance(value, dict)
+                }
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to load identity state: {e}")
+
+    def _save_identity_state(self):
+        try:
+            with open(self.identity_state_path, "w", encoding="utf-8") as f:
+                json.dump(self.identity_state, f, indent=2)
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to save identity state: {e}")
+
     def _init_identity_state(self, sat_id: int):
         if sat_id not in self.identity_state:
             self.identity_state[sat_id] = {
                 "active_user": "Guest",
                 "loaded_date": datetime.now().strftime("%Y-%m-%d"),
-                "has_prompted": False
+                "has_prompted": False,
+                "is_waiting_confirm": False,
+                "pending_name": None,
             }
+        else:
+            self.identity_state[sat_id].setdefault("is_waiting_confirm", False)
+            self.identity_state[sat_id].setdefault("pending_name", None)
 
     def _check_daily_rollover(self, sat_id: int):
         """Checks if the date has changed. If so, wipes trust and resets to Guest."""
@@ -83,6 +114,9 @@ class EngineState:
             self.identity_state[sat_id]["active_user"] = "Guest"
             self.identity_state[sat_id]["loaded_date"] = current_date
             self.identity_state[sat_id]["has_prompted"] = False
+            self.identity_state[sat_id]["is_waiting_confirm"] = False
+            self.identity_state[sat_id]["pending_name"] = None
+            self._save_identity_state()
 
     def get_active_user(self, sat_id: int) -> str:
         self._check_daily_rollover(sat_id)
@@ -97,12 +131,29 @@ class EngineState:
         self.identity_state[sat_id]["active_user"] = clean_name
         self.identity_state[sat_id]["loaded_date"] = datetime.now().strftime("%Y-%m-%d")
         self.identity_state[sat_id]["has_prompted"] = True
+        self.identity_state[sat_id]["is_waiting_confirm"] = False
+        self.identity_state[sat_id]["pending_name"] = None
         logger.info(f"👤 Profile Locked [Sat {sat_id}]: {clean_name}")
+        self._save_identity_state()
 
     def mark_identity_prompted(self, sat_id: int):
         """Silences the identity nag prompt for the rest of the day."""
         self._init_identity_state(sat_id)
         self.identity_state[sat_id]["has_prompted"] = True
+        self._save_identity_state()
+
+    def set_pending_identity(self, sat_id: int, pending_name: str):
+        self._check_daily_rollover(sat_id)
+        self.identity_state[sat_id]["is_waiting_confirm"] = True
+        self.identity_state[sat_id]["pending_name"] = pending_name
+        self.identity_state[sat_id]["has_prompted"] = True
+        self._save_identity_state()
+
+    def clear_pending_identity(self, sat_id: int):
+        self._init_identity_state(sat_id)
+        self.identity_state[sat_id]["is_waiting_confirm"] = False
+        self.identity_state[sat_id]["pending_name"] = None
+        self._save_identity_state()
 
     def needs_identity_prompt(self, sat_id: int) -> bool:
         """Returns True if it's a Guest and we haven't nagged them yet today."""

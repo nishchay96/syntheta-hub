@@ -24,10 +24,10 @@ OLLAMA_CHAT_URL = "http://localhost:11434/api/chat"
 
 # Token limits per route — keep responses tight for voice
 TOKEN_LIMITS = {
-    "general_web_search": 500,   # Needs room to synthesise web data
-    "general_no_web":     150,   # Conversational — stay snappy
-    "sql_metrics":        200,
-    "default":            150,
+    "general_web_search": 250,   # synthesise web data, heavily truncated
+    "general_no_web":     75,    # Conversational — stay snappy
+    "sql_metrics":        100,
+    "default":            100,
 }
 
 
@@ -104,9 +104,8 @@ class OllamaBridge:
                 "num_predict": predict_limit,
             }
         }
-        if not is_reasoning:
-            payload["format"] = "json"
-
+        # Disable strict JSON formatting as it severely slows down logits computation on local hardware.
+        # The prompt sufficiently guides the model to output JSON.
         try:
             timeout = 120 if is_reasoning else 90
             response = requests.post(
@@ -184,7 +183,7 @@ class OllamaBridge:
 1. You are a voice assistant. Speak naturally and warmly.
 2. NEVER mention your "memory", "database", "context window", or internal systems.
 3. NEVER say "I will remember this." Background systems handle this invisibly.
-4. Keep your spoken "response" under 3 short sentences.
+4. Keep your spoken "response" EXTREMELY concise. Under 2 short sentences. Max 20 words. Time is of the essence.
 5. If the user asks about themselves, use the MEMORY provided below without attribution.
 6. Use TODAY'S DATE above to give time-aware answers. Never guess outdated information.
 7. Output STRICTLY in the JSON format below.
