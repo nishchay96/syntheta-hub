@@ -395,12 +395,27 @@ class LibrarianRouter:
     def _extract_weather_location(self, query: str) -> Optional[str]:
         q = re.sub(r"\s+", " ", query.lower()).strip()
         match = re.search(
-            r"\b(?:weather|wheather|temperature|forecast)\b.*?\bin\s+([a-zA-Z][a-zA-Z\s.\-]{1,60}?)(?:\s+\b(?:now|today|currently)\b)?[?.! ]*$",
+            r"\b(?:weather|wheather|temperature|forecast|rain|aqi|air quality)\b.*?\bin\s+([a-zA-Z][a-zA-Z\s.\-]{1,60}?)(?:\s+\b(?:now|today|currently)\b)?[?.! ]*$",
             q,
         )
         if match:
-            return match.group(1).strip(" ?.!").title()
+            location = match.group(1).strip(" ?.!").lower()
+            if self._is_location_placeholder(location):
+                return None
+            return location.title()
         return None
+
+    def _is_location_placeholder(self, location: str) -> bool:
+        loc = re.sub(r"\s+", " ", (location or "").lower()).strip(" ?.!," )
+        if not loc:
+            return True
+        if loc in {"here", "there"}:
+            return True
+        if re.fullmatch(r"(?:my|this|current)\s+(?:area|city|town|place|location|region|district|state)", loc):
+            return True
+        if re.fullmatch(r"(?:near|around)\s+(?:me|here)", loc):
+            return True
+        return False
 
     def _force_live_web_query(self, query: str) -> bool:
         q = re.sub(r"\s+", " ", query.lower()).strip()
@@ -408,10 +423,12 @@ class LibrarianRouter:
         product_words = ["phone", "smartphone", "mobile", "model", "version", "release", "launched", "launch", "flagship", "series"]
         if self._extract_weather_location(q):
             return True
+        if any(token in q for token in ["weather", "forecast", "temperature", "rain", "aqi", "air quality"]):
+            return True
         if any(token in q for token in freshness_words) and any(token in q for token in product_words):
             return True
         if any(token in q for token in ["iphone", "samsung", "pixel", "xiaomi", "oneplus", "oppo", "vivo", "nothing"]) and any(
-            token in q for token in freshness_words + ["phone", "smartphone", "mobile", "flagship", "model"]
+            token in q for token in freshness_words + ["flagship", "model", "series", "version", "release", "launched", "launch"]
         ):
             return True
         if any(token in q for token in ["btc", "bitcoin", "ethereum", "eth", "crypto", "cryptocurrency"]) and any(word in q for word in ["price", "live", "current", "usd", "value"]):
@@ -457,6 +474,8 @@ class LibrarianRouter:
         location = self._extract_weather_location(q)
         if location:
             return f"weather {location}"
+        if any(token in q for token in ["weather", "forecast", "temperature", "rain", "aqi", "air quality"]):
+            return q
         if any(token in q for token in freshness_words) and any(token in q for token in product_words):
             return q
         if any(token in q for token in ["iphone", "samsung", "pixel", "xiaomi", "oneplus", "oppo", "vivo", "nothing"]) and any(
@@ -609,17 +628,6 @@ class LibrarianRouter:
 
         if not results:
             logger.warning(f"🌐 All web search backends exhausted for: '{query}'")
-            # Queue async deep research via OpenClaw worker
-            try:
-                from core.database_manager import DatabaseManager
-                db = DatabaseManager()
-                db.insert_openclaw_job(
-                    "research", query,
-                    {"topic": query, "depth": "detailed"},
-                    priority=3
-                )
-            except Exception:
-                pass
             return None
 
         # ── Synthesise with mistral ────────────────────────────

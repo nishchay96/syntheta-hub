@@ -136,7 +136,12 @@ class OpenClawWorker:
             logger.info(f"📰 OpenClaw refreshed global top news ({len(items)} items)")
 
     def _refresh_global_weather(self):
-        topic_key = self._topic_key(f"{GLOBAL_WEATHER_CITY}_current")
+        detected_location = self._resolve_global_weather_location()
+        if not detected_location:
+            logger.info("🌦️ OpenClaw could not detect a default weather location yet.")
+            return
+
+        topic_key = self._topic_key("default_current")
         cached = self.db.get_curated_topic("global", "Weather", topic_key, limit=1)
         if cached:
             return
@@ -144,7 +149,7 @@ class OpenClawWorker:
         try:
             geo = requests.get(
                 "https://geocoding-api.open-meteo.com/v1/search",
-                params={"name": GLOBAL_WEATHER_CITY, "count": 1, "language": "en", "format": "json"},
+                params={"name": detected_location, "count": 1, "language": "en", "format": "json"},
                 timeout=8.0,
                 headers={"User-Agent": "Mozilla/5.0"},
             )
@@ -159,17 +164,42 @@ class OpenClawWorker:
                 params={
                     "latitude": place["latitude"],
                     "longitude": place["longitude"],
-                    "current": "temperature_2m,wind_speed_10m",
+                    "current": "temperature_2m,apparent_temperature,wind_speed_10m,rain,weather_code",
+                    "daily": "temperature_2m_max,temperature_2m_min,precipitation_probability_max,rain_sum",
                     "timezone": "auto",
+                    "forecast_days": 2,
                 },
                 timeout=8.0,
                 headers={"User-Agent": "Mozilla/5.0"},
             )
             forecast.raise_for_status()
-            current = forecast.json().get("current", {})
+            weather_data = forecast.json()
+            current = weather_data.get("current", {})
             temp = current.get("temperature_2m")
+            feels_like = current.get("apparent_temperature")
             wind = current.get("wind_speed_10m")
-            if temp is None and wind is None:
+            rain = current.get("rain")
+            daily = weather_data.get("daily", {})
+            forecast_dates = daily.get("time", [])
+            forecast_highs = daily.get("temperature_2m_max", [])
+            forecast_lows = daily.get("temperature_2m_min", [])
+            forecast_rain_probs = daily.get("precipitation_probability_max", [])
+            forecast_rain_sums = daily.get("rain_sum", [])
+
+            aqi_res = requests.get(
+                "https://air-quality-api.open-meteo.com/v1/air-quality",
+                params={
+                    "latitude": place["latitude"],
+                    "longitude": place["longitude"],
+                    "current": "us_aqi",
+                    "timezone": "auto",
+                },
+                timeout=8.0,
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            aqi_res.raise_for_status()
+            us_aqi = (aqi_res.json().get("current") or {}).get("us_aqi")
+            if temp is None and wind is None and us_aqi is None:
                 return
         except Exception as e:
             logger.warning(f"⚠️ OpenClaw global weather refresh failed: {e}")
@@ -198,13 +228,47 @@ class OpenClawWorker:
                     "admin1": place.get("admin1"),
                     "country": place.get("country"),
                     "temperature_c": temp,
+                    "feels_like_c": feels_like,
                     "wind_kmh": wind,
+                    "rain_mm": rain,
+                    "us_aqi": us_aqi,
+                    "forecast_date": forecast_dates[1] if len(forecast_dates) > 1 else None,
+                    "forecast_high_c": forecast_highs[1] if len(forecast_highs) > 1 else None,
+                    "forecast_low_c": forecast_lows[1] if len(forecast_lows) > 1 else None,
+                    "forecast_rain_probability": forecast_rain_probs[1] if len(forecast_rain_probs) > 1 else None,
+                    "forecast_rain_mm": forecast_rain_sums[1] if len(forecast_rain_sums) > 1 else None,
+                    "detected_location": detected_location,
                 },
                 "confidence": 95,
             }],
             ttl_seconds=GLOBAL_REFRESH_TTL_SEC,
         )
         logger.info(f"🌦️ OpenClaw refreshed global weather for {location_label}")
+
+    def _resolve_global_weather_location(self) -> str | None:
+        if GLOBAL_WEATHER_CITY and GLOBAL_WEATHER_CITY.upper() != "AUTO":
+            return GLOBAL_WEATHER_CITY
+
+        cached = self.db.get_curated_topic("global", "Weather", self._topic_key("default_current"), limit=1)
+        if cached:
+            payload = cached[0].get("payload_json") or {}
+            city = (payload.get("city") or "").strip()
+            admin1 = (payload.get("admin1") or "").strip()
+            if city:
+                return f"{city}, {admin1}".strip(", ") if admin1 else city
+
+        for url in ["https://ipwho.is/", "https://ipapi.co/json/"]:
+            try:
+                res = requests.get(url, timeout=6.0, headers={"User-Agent": "Mozilla/5.0"})
+                res.raise_for_status()
+                data = res.json()
+                city = (data.get("city") or "").strip()
+                region = (data.get("region") or data.get("region_name") or "").strip()
+                if city:
+                    return f"{city}, {region}".strip(", ") if region else city
+            except Exception:
+                continue
+        return None
 
     def _refresh_user_interest_news(self, user_id: str, high_priority: bool = False):
         interests = self._get_user_interest_topics(user_id)

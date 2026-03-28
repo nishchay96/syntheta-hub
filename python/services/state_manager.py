@@ -66,6 +66,9 @@ class EngineState:
         )
         os.makedirs(os.path.dirname(self.identity_state_path), exist_ok=True)
         self._load_identity_state()
+        self.pending_weather = {}  # {sat_id: {"kind": "aqi|weather|forecast|rain"}}
+        self.last_weather_location = {}  # {sat_id: "City, Region"}
+        self.last_live_context = {}  # {sat_id: {"query": str, "items": [str, ...]}}
 
     # ----------------------------------------------------------
     # IDENTITY & PROFILE MANAGEMENT
@@ -97,10 +100,12 @@ class EngineState:
                 "active_user": "Guest",
                 "loaded_date": datetime.now().strftime("%Y-%m-%d"),
                 "has_prompted": False,
+                "awaiting_identity": False,
                 "is_waiting_confirm": False,
                 "pending_name": None,
             }
         else:
+            self.identity_state[sat_id].setdefault("awaiting_identity", False)
             self.identity_state[sat_id].setdefault("is_waiting_confirm", False)
             self.identity_state[sat_id].setdefault("pending_name", None)
 
@@ -114,6 +119,7 @@ class EngineState:
             self.identity_state[sat_id]["active_user"] = "Guest"
             self.identity_state[sat_id]["loaded_date"] = current_date
             self.identity_state[sat_id]["has_prompted"] = False
+            self.identity_state[sat_id]["awaiting_identity"] = False
             self.identity_state[sat_id]["is_waiting_confirm"] = False
             self.identity_state[sat_id]["pending_name"] = None
             self._save_identity_state()
@@ -131,19 +137,31 @@ class EngineState:
         self.identity_state[sat_id]["active_user"] = clean_name
         self.identity_state[sat_id]["loaded_date"] = datetime.now().strftime("%Y-%m-%d")
         self.identity_state[sat_id]["has_prompted"] = True
+        self.identity_state[sat_id]["awaiting_identity"] = False
         self.identity_state[sat_id]["is_waiting_confirm"] = False
         self.identity_state[sat_id]["pending_name"] = None
         logger.info(f"👤 Profile Locked [Sat {sat_id}]: {clean_name}")
         self._save_identity_state()
 
     def mark_identity_prompted(self, sat_id: int):
-        """Silences the identity nag prompt for the rest of the day."""
+        """Marks the guest prompt as asked and waits for a direct identity reply."""
         self._init_identity_state(sat_id)
         self.identity_state[sat_id]["has_prompted"] = True
+        self.identity_state[sat_id]["awaiting_identity"] = True
+        self._save_identity_state()
+
+    def is_awaiting_identity(self, sat_id: int) -> bool:
+        self._check_daily_rollover(sat_id)
+        return bool(self.identity_state[sat_id].get("awaiting_identity"))
+
+    def clear_identity_prompt(self, sat_id: int):
+        self._init_identity_state(sat_id)
+        self.identity_state[sat_id]["awaiting_identity"] = False
         self._save_identity_state()
 
     def set_pending_identity(self, sat_id: int, pending_name: str):
         self._check_daily_rollover(sat_id)
+        self.identity_state[sat_id]["awaiting_identity"] = False
         self.identity_state[sat_id]["is_waiting_confirm"] = True
         self.identity_state[sat_id]["pending_name"] = pending_name
         self.identity_state[sat_id]["has_prompted"] = True
@@ -151,9 +169,35 @@ class EngineState:
 
     def clear_pending_identity(self, sat_id: int):
         self._init_identity_state(sat_id)
+        self.identity_state[sat_id]["awaiting_identity"] = False
         self.identity_state[sat_id]["is_waiting_confirm"] = False
         self.identity_state[sat_id]["pending_name"] = None
         self._save_identity_state()
+
+    def set_pending_weather(self, sat_id: int, kind: str = "weather"):
+        self.pending_weather[sat_id] = {"kind": kind or "weather"}
+
+    def get_pending_weather(self, sat_id: int):
+        return self.pending_weather.get(sat_id)
+
+    def clear_pending_weather(self, sat_id: int):
+        self.pending_weather.pop(sat_id, None)
+
+    def set_last_weather_location(self, sat_id: int, location: str):
+        if location:
+            self.last_weather_location[sat_id] = location
+
+    def get_last_weather_location(self, sat_id: int) -> str | None:
+        return self.last_weather_location.get(sat_id)
+
+    def set_last_live_context(self, sat_id: int, query: str, items: list[str]):
+        self.last_live_context[sat_id] = {
+            "query": query or "",
+            "items": list(items or []),
+        }
+
+    def get_last_live_context(self, sat_id: int):
+        return self.last_live_context.get(sat_id)
 
     def needs_identity_prompt(self, sat_id: int) -> bool:
         """Returns True if it's a Guest and we haven't nagged them yet today."""

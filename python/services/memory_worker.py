@@ -594,7 +594,7 @@ Output the COMPLETE updated nodes dict. Raw JSON only."""
                 logger.info("[Gate] All new nodes rejected — preserving existing.")
                 return existing_nodes
             else:
-                return self._build_minimal_node(fact_summary, bucket_name)
+                return {}
 
         return validated
 

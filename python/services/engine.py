@@ -173,6 +173,16 @@ class SynthetaEngine:
         query = packet.get("failed_web_query") or text
         return f"I couldn't fetch live current data for '{query}' right now because web retrieval is unavailable. Please try again later."
 
+    def _direct_weather_location_reply(self, packet: dict) -> str | None:
+        if packet.get("web_data") != "__ASK_WEATHER_LOCATION__":
+            return None
+        return "I couldn't detect your location for weather yet. Tell me your city, and I'll fetch the weather, AQI, rain, and forecast."
+
+    def _direct_weather_unavailable_reply(self, packet: dict) -> str | None:
+        if packet.get("web_data") != "__WEATHER_UNAVAILABLE__":
+            return None
+        return "I couldn't fetch weather data for that location right now. Tell me your city again in a moment, and I'll try the weather, AQI, rain, and forecast."
+
     def register_comms(self, comms_instance):
         self.comms = comms_instance
         logger.info("🔗 Network Manager Registered.")
@@ -563,6 +573,101 @@ class SynthetaEngine:
     def _canonicalize_profile_name(self, candidate: str) -> str:
         return " ".join(part.capitalize() for part in re.split(r"\s+", candidate.strip()) if part)
 
+    def _is_follow_up_request(self, text: str) -> bool:
+        normalized = re.sub(r"\s+", " ", text.lower()).strip(" ?.!")
+        followups = {
+            "more", "more detail", "more details", "details", "tell me more",
+            "go on", "continue", "expand", "elaborate", "explain more",
+            "what else", "next", "and then", "further details",
+        }
+        return normalized in followups
+
+    def _infer_weather_kind(self, text: str) -> str:
+        normalized = re.sub(r"\s+", " ", (text or "").lower()).strip()
+        if "aqi" in normalized or "air quality" in normalized:
+            return "aqi"
+        if "forecast" in normalized or "tomorrow" in normalized or "next" in normalized:
+            return "forecast"
+        if "rain" in normalized:
+            return "rain"
+        return "weather"
+
+    def _looks_like_location_reply(self, text: str) -> bool:
+        normalized = re.sub(r"\s+", " ", text.lower()).strip(" ?.!," )
+        if not normalized or len(normalized.split()) > 6:
+            return False
+        if normalized in {"what", "so what is the aqi", "so what is the weather", "weather", "aqi"}:
+            return False
+        if normalized in {"here", "there"}:
+            return False
+        if re.fullmatch(r"(?:my|this|current)\s+(?:area|city|town|place|location|region|district|state)", normalized):
+            return False
+        if re.fullmatch(r"(?:near|around)\s+(?:me|here)", normalized):
+            return False
+        if re.search(r"\b(?:weather|aqi|forecast|rain|temperature|news|price|stock|bitcoin)\b", normalized):
+            return False
+        return re.fullmatch(r"[a-zA-Z][a-zA-Z\s.\-]{1,60}", normalized) is not None
+
+    def _apply_pending_weather_followup(self, sat_id: int, text: str) -> str:
+        pending_weather = self.state.get_pending_weather(sat_id)
+        if not pending_weather:
+            return text
+        if not self._looks_like_location_reply(text):
+            return text
+        kind = pending_weather.get("kind", "weather")
+        location = text.strip(" ?.!")
+        self.state.clear_pending_weather(sat_id)
+        self.state.set_last_weather_location(sat_id, location)
+        if kind == "aqi":
+            return f"what is the AQI in {location}"
+        if kind == "forecast":
+            return f"weather forecast for {location}"
+        if kind == "rain":
+            return f"will it rain in {location} today"
+        return f"what is the weather in {location}"
+
+    def _apply_weather_location_reuse(self, sat_id: int, text: str) -> str:
+        normalized = re.sub(r"\s+", " ", text.lower()).strip(" ?.!," )
+        if re.search(r"\bin\s+[a-zA-Z]", normalized):
+            return text
+        last_location = self.state.get_last_weather_location(sat_id)
+        if not last_location:
+            return text
+        kind = self._infer_weather_kind(normalized)
+        if kind == "aqi" and ("aqi" in normalized or "air quality" in normalized):
+            return f"what is the AQI in {last_location}"
+        if kind == "forecast" and any(term in normalized for term in ["forecast", "tomorrow", "next"]):
+            return f"weather forecast for {last_location}"
+        if kind == "rain" and "rain" in normalized:
+            return f"will it rain in {last_location} today"
+        if "weather" in normalized or "temperature" in normalized:
+            return f"what is the weather in {last_location}"
+        return text
+
+    def _apply_live_followup(self, sat_id: int, text: str) -> str:
+        if not self._is_follow_up_request(text):
+            return text
+        live_ctx = self.state.get_last_live_context(sat_id) or {}
+        items = live_ctx.get("items") or []
+        if not items:
+            return text
+        topic = items[0]
+        return f"give me more details about {topic}"
+
+    def _capture_live_context(self, sat_id: int, query: str, memory_tank: str):
+        if "--- LIVE WEB" not in (memory_tank or ""):
+            return
+        bullets = []
+        for line in memory_tank.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("• ") and not stripped.startswith("• Source:"):
+                item = stripped[2:].strip()
+                item = re.sub(r"\s+\([^)]*\)$", "", item).strip()
+                if item:
+                    bullets.append(item)
+        if bullets:
+            self.state.set_last_live_context(sat_id, query, bullets)
+
     def _queue_profile_creation(self, sat_id: int, candidate_name: str):
         self.state.set_pending_identity(sat_id, candidate_name)
         current_user = self.state.get_active_user(sat_id)
@@ -582,6 +687,9 @@ class SynthetaEngine:
         if telemetry is None:
             telemetry = {}
         current_session_id = self.state.session_start_time
+        text = self._apply_pending_weather_followup(sat_id, text)
+        text = self._apply_weather_location_reuse(sat_id, text)
+        text = self._apply_live_followup(sat_id, text)
 
         # 🟢 IDENTITY LOGIC REFINEMENT (Load vs Create)
         clean_text = text.lower().strip()
@@ -602,7 +710,7 @@ class SynthetaEngine:
         confirm_state = self.state.identity_state.get(sat_id, {})
         is_waiting_confirm = confirm_state.get("is_waiting_confirm", False)
         pending_name = confirm_state.get("pending_name")
-        just_asked = confirm_state.get("has_prompted", False)
+        awaiting_identity = self.state.is_awaiting_identity(sat_id)
 
         # --- CASE A: Explicit Creation ---
         if create_match:
@@ -631,14 +739,16 @@ class SynthetaEngine:
             if any(w in clean_text for w in ["yes", "yeah", "sure", "ok", "create"]):
                 self._activate_profile(sat_id, pending_name, is_new=True)
                 self.state.clear_pending_identity(sat_id)
-            elif any(w in clean_text for w in ["no", "dont", "don't", "stop"]):
+                return
+            if any(w in clean_text for w in ["no", "dont", "don't", "stop"]):
                 fallback_user = self.state.get_active_user(sat_id)
                 if fallback_user != "Guest":
                     self._speak(sat_id, f"No problem. I'll keep {fallback_user.capitalize()}'s profile loaded.")
                 else:
                     self._speak(sat_id, "No problem. I'll keep you as Guest for now.")
                 self.state.clear_pending_identity(sat_id)
-            return
+                return
+            self.state.clear_pending_identity(sat_id)
 
         # 🟢 UNIFIED INTENT PROCESSING: Rely on PiManager
         plan = self.pi.process_query(sat_id, text)
@@ -653,15 +763,16 @@ class SynthetaEngine:
                 self.handle_resume_confirmation(sat_id, False); return
             if intent and intent != "unknown":
                 # Clear identity prompt if we executed a command instead of answering the name
-                if just_asked or is_waiting_confirm:
-                    self.state._init_identity_state(sat_id)
+                if awaiting_identity:
+                    self.state.clear_identity_prompt(sat_id)
                 self._execute_plan(sat_id, plan, telemetry); return
 
         # --- CASE C: Prompted Response (Simplified "Nishchay") ---
-        if just_asked and len(clean_text.split()) <= 2:
-            candidate = clean_text.replace("here", "").strip().split()[0]
+        if awaiting_identity and len(clean_text.split()) <= 3 and not self._is_follow_up_request(clean_text):
+            candidate = re.sub(r"\b(?:here|this is|it's|its)\b", "", clean_text).strip()
+            candidate = " ".join(candidate.split()[:3])
             if not self._looks_like_person_name(candidate):
-                self.state.clear_pending_identity(sat_id)
+                self.state.clear_identity_prompt(sat_id)
                 # Fall through to normal pipeline instead of treating as name
             else:
                 name = self._canonicalize_profile_name(candidate)
@@ -670,6 +781,8 @@ class SynthetaEngine:
                 else:
                     self._queue_profile_creation(sat_id, name)
                 return
+        elif awaiting_identity:
+            self.state.clear_identity_prompt(sat_id)
 
         # --- NEW DECISION TREE (The "Doors") ---
         # Door 1: Reflex Catalog (Handled above by pi.process_query)
@@ -778,25 +891,46 @@ class SynthetaEngine:
         print("=" * 60 + "\n")
 
         try:
-            direct_live_failure = self._direct_live_failure_reply(resolved_input, packet)
-            if direct_live_failure:
+            self._capture_live_context(sat_id, resolved_input, packet.get("memory_tank") or "")
+            direct_weather_location = self._direct_weather_location_reply(packet)
+            if direct_weather_location:
+                self.state.set_pending_weather(sat_id, self._infer_weather_kind(resolved_input))
                 llm_response_dict = {
-                    "response": direct_live_failure,
-                    "active_subject": "live_lookup_failed",
+                    "response": direct_weather_location,
+                    "active_subject": "weather_location_required",
                     "is_action": False,
                     "execute": None,
                 }
             else:
-                direct_live_reply = self._direct_counted_live_reply(resolved_input, packet)
-                if direct_live_reply:
+                direct_weather_unavailable = self._direct_weather_unavailable_reply(packet)
+                if direct_weather_unavailable:
+                    self.state.set_pending_weather(sat_id, self._infer_weather_kind(resolved_input))
                     llm_response_dict = {
-                        "response": direct_live_reply,
-                        "active_subject": "live_list",
+                        "response": direct_weather_unavailable,
+                        "active_subject": "weather_unavailable",
                         "is_action": False,
                         "execute": None,
                     }
                 else:
-                    llm_response_dict = self.llm.generate(packet)
+                    direct_live_failure = self._direct_live_failure_reply(resolved_input, packet)
+                    if direct_live_failure:
+                        llm_response_dict = {
+                            "response": direct_live_failure,
+                            "active_subject": "live_lookup_failed",
+                            "is_action": False,
+                            "execute": None,
+                        }
+                    else:
+                        direct_live_reply = self._direct_counted_live_reply(resolved_input, packet)
+                        if direct_live_reply:
+                            llm_response_dict = {
+                                "response": direct_live_reply,
+                                "active_subject": "live_list",
+                                "is_action": False,
+                                "execute": None,
+                            }
+                        else:
+                            llm_response_dict = self.llm.generate(packet)
 
             if self.state.session_start_time != current_session_id:
                 logger.warning("🚫 Barge-in detected. Aborting stale response.")

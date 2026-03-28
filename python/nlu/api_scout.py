@@ -223,14 +223,14 @@ class APIScout:
             (["stock", "stocks", "share", "shares", "nse", "bse", "nasdaq", "nyse", "sensex", "nifty"], "Finance"),
             (["crypto", "cryptocurrency", "bitcoin", "btc", "ethereum", "eth", "solana", "dogecoin", "xrp"], "Cryptocurrency"),
             (["iphone", "samsung", "pixel", "xiaomi", "oneplus", "oppo", "vivo", "nothing", "phone", "smartphone", "mobile"], "Phone"),
-            (["weather", "forecast", "temperature"], "Weather"),
+            (["weather", "forecast", "temperature", "rain", "aqi", "air quality"], "Weather"),
             (["prime minister", "president", "government", "diwali", "deepavali", "holiday"], "Government"),
             (["tweet", "tweets", "post", "posts", "truth social"], "Social"),
             (["live score", "score", "match", "cricket", "football", "nba", "nfl", "ipl"], "Sports & Fitness"),
             (["news", "trending", "headline", "headlines"], "News"),
         ]
         for needles, target_cat in priority_aliases:
-            if target_cat in self.categories and any(needle in b_low for needle in needles):
+            if target_cat in self.categories and any(self._query_contains_term(b_low, needle) for needle in needles):
                 return target_cat
         
         # 1. Exact or Substring Match (Case-Insensitive)
@@ -273,6 +273,7 @@ class APIScout:
             "bollywood": "Entertainment", "hollywood": "Entertainment", "box": "Entertainment",
             "office": "Entertainment", "release": "Entertainment", "releases": "Entertainment",
             "music": "Music", "songs": "Music", "weather": "Weather", "forecast": "Weather",
+            "rain": "Weather", "aqi": "Weather",
             "score": "Sports & Fitness", "scores": "Sports & Fitness", "match": "Sports & Fitness",
             "cricket": "Sports & Fitness", "football": "Sports & Fitness", "soccer": "Sports & Fitness",
             "basketball": "Sports & Fitness", "nba": "Sports & Fitness", "nfl": "Sports & Fitness",
@@ -398,15 +399,109 @@ class APIScout:
             padded = padded.replace(wrong, right)
         return padded.strip()
 
+    def _query_contains_term(self, normalized_query: str, term: str) -> bool:
+        pattern = r"\b" + re.escape(term.lower()).replace(r"\ ", r"\s+") + r"\b"
+        return re.search(pattern, normalized_query) is not None
+
+    def _is_location_placeholder(self, location: str) -> bool:
+        loc = re.sub(r"\s+", " ", (location or "").lower()).strip(" ?.!," )
+        if not loc:
+            return True
+        if loc in {"here", "there"}:
+            return True
+        if re.fullmatch(r"(?:my|this|current)\s+(?:area|city|town|place|location|region|district|state)", loc):
+            return True
+        if re.fullmatch(r"(?:near|around)\s+(?:me|here)", loc):
+            return True
+        return False
+
     def _extract_weather_location(self, query: str) -> str | None:
         q = self._normalize_query(query)
         match = re.search(
-            r"\b(?:weather|wheather|temperature|forecast)\b.*?\bin\s+([a-zA-Z][a-zA-Z\s.\-]{1,60}?)(?:\s+\b(?:now|today|currently)\b)?[?.! ]*$",
+            r"\b(?:weather|wheather|temperature|forecast|rain|aqi|air quality)\b.*?\bin\s+([a-zA-Z][a-zA-Z\s.\-]{1,60}?)(?:\s+\b(?:now|today|currently)\b)?[?.! ]*$",
             q,
         )
         if match:
-            return match.group(1).strip(" ?.!").title()
+            location = match.group(1).strip(" ?.!").lower()
+            if self._is_location_placeholder(location):
+                return None
+            return location.title()
         return None
+
+    def _is_general_weather_query(self, query: str) -> bool:
+        q = self._normalize_query(query)
+        return any(term in q for term in ["weather", "forecast", "temperature", "rain", "aqi", "air quality"])
+
+    def _detect_default_weather_location(self) -> str | None:
+        try:
+            for url in ["https://ipwho.is/", "https://ipapi.co/json/"]:
+                res = requests.get(url, timeout=6.0, headers={"User-Agent": "Mozilla/5.0"})
+                res.raise_for_status()
+                data = res.json()
+                city = (data.get("city") or "").strip()
+                region = (data.get("region") or data.get("region_name") or data.get("admin1") or "").strip()
+                if city:
+                    return f"{city}, {region}".strip(", ") if region else city
+        except Exception:
+            return None
+        return None
+
+    def _get_default_weather_location(self) -> str | None:
+        cached = self.db.get_curated_topic("global", "Weather", self._topic_cache_key("default_current"), limit=1)
+        if cached:
+            payload = cached[0].get("payload_json") or {}
+            city = (payload.get("city") or "").strip()
+            admin1 = (payload.get("admin1") or "").strip()
+            if city:
+                return f"{city}, {admin1}".strip(", ") if admin1 else city
+        if GLOBAL_WEATHER_CITY and GLOBAL_WEATHER_CITY.upper() != "AUTO":
+            return GLOBAL_WEATHER_CITY
+        detected = self._detect_default_weather_location()
+        if detected:
+            return detected
+        return None
+
+    def _format_weather_cache(self, items: list[dict], forecast: bool = False) -> str | None:
+        if not items:
+            return None
+        payload = items[0].get("payload_json") or {}
+        city = payload.get("city") or "your area"
+        admin1 = payload.get("admin1") or payload.get("country") or ""
+        location_label = f"{city}, {admin1}".strip(", ")
+        lines = []
+        if forecast:
+            date = payload.get("forecast_date")
+            high = payload.get("forecast_high_c")
+            low = payload.get("forecast_low_c")
+            rain_prob = payload.get("forecast_rain_probability")
+            rain_mm = payload.get("forecast_rain_mm")
+            lines.append(f"Forecast for {location_label}{' on ' + str(date) if date else ''}")
+            if high is not None:
+                lines.append(f"High: {round(float(high))}°C")
+            if low is not None:
+                lines.append(f"Low: {round(float(low))}°C")
+            if rain_prob is not None:
+                lines.append(f"Rain chance: {round(float(rain_prob))}%")
+            if rain_mm is not None:
+                lines.append(f"Expected rain: {float(rain_mm):.1f} mm")
+        else:
+            temp = payload.get("temperature_c")
+            feels_like = payload.get("feels_like_c")
+            wind = payload.get("wind_kmh")
+            rain = payload.get("rain_mm")
+            aqi = payload.get("us_aqi")
+            lines.append(f"Current weather in {location_label}")
+            if temp is not None:
+                lines.append(f"Temperature: {round(float(temp))}°C")
+            if feels_like is not None:
+                lines.append(f"Feels like: {round(float(feels_like))}°C")
+            if wind is not None:
+                lines.append(f"Wind speed: {round(float(wind))} km/h")
+            if rain is not None:
+                lines.append(f"Rain now: {float(rain):.1f} mm")
+            if aqi is not None:
+                lines.append(f"US AQI: {int(float(aqi))}")
+        return self._format_live_bullets(lines, "OpenClaw curated cache")
 
     def _is_bitcoin_price_query(self, query: str) -> bool:
         q = self._normalize_query(query)
@@ -1099,11 +1194,12 @@ class APIScout:
 
     def _handle_weather_query(self, location: str) -> str | None:
         requested_key = self._topic_cache_key(f"{location}_current")
-        default_key = self._topic_cache_key(f"{GLOBAL_WEATHER_CITY}_current")
-        if requested_key == default_key:
+        default_key = self._topic_cache_key("default_current")
+        default_location = self._get_default_weather_location()
+        if default_location and requested_key == self._topic_cache_key(f"{default_location}_current"):
             cached = self.db.get_curated_topic("global", "Weather", default_key, limit=1)
             if cached:
-                return self._format_curated_cache(cached, "OpenClaw curated cache")
+                return self._format_weather_cache(cached, forecast=False)
         try:
             geo = requests.get(
                 "https://geocoding-api.open-meteo.com/v1/search",
@@ -1127,7 +1223,7 @@ class APIScout:
                 params={
                     "latitude": place["latitude"],
                     "longitude": place["longitude"],
-                    "current": "temperature_2m,wind_speed_10m,weather_code",
+                    "current": "temperature_2m,apparent_temperature,wind_speed_10m,rain,weather_code",
                     "timezone": "auto",
                 },
                 timeout=8.0,
@@ -1136,15 +1232,36 @@ class APIScout:
             forecast.raise_for_status()
             current = forecast.json().get("current", {})
             temp = current.get("temperature_2m")
+            feels_like = current.get("apparent_temperature")
             wind = current.get("wind_speed_10m")
-            if temp is None and wind is None:
+            rain = current.get("rain")
+            aqi_res = requests.get(
+                "https://air-quality-api.open-meteo.com/v1/air-quality",
+                params={
+                    "latitude": place["latitude"],
+                    "longitude": place["longitude"],
+                    "current": "us_aqi",
+                    "timezone": "auto",
+                },
+                timeout=8.0,
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            aqi_res.raise_for_status()
+            aqi = (aqi_res.json().get("current") or {}).get("us_aqi")
+            if temp is None and wind is None and aqi is None:
                 return None
 
             parts = []
             if temp is not None:
                 parts.append(f"• Current temperature in {place['name']}, {place.get('admin1', place.get('country', ''))}: {round(float(temp))}°C.")
+            if feels_like is not None:
+                parts.append(f"• Feels like: {round(float(feels_like))}°C.")
             if wind is not None:
                 parts.append(f"• Wind speed: {round(float(wind))} km/h.")
+            if rain is not None:
+                parts.append(f"• Rain now: {float(rain):.1f} mm.")
+            if aqi is not None:
+                parts.append(f"• US AQI: {int(float(aqi))}.")
             parts.append("• Source: Open-Meteo.")
             return f"--- LIVE WEB ({datetime.now().strftime('%B %d, %Y')}) ---\n" + "\n".join(parts)
         except Exception as e:
@@ -1152,6 +1269,13 @@ class APIScout:
             return None
 
     def _handle_weather_forecast_query(self, location: str) -> str | None:
+        requested_key = self._topic_cache_key(f"{location}_current")
+        default_key = self._topic_cache_key("default_current")
+        default_location = self._get_default_weather_location()
+        if default_location and requested_key == self._topic_cache_key(f"{default_location}_current"):
+            cached = self.db.get_curated_topic("global", "Weather", default_key, limit=1)
+            if cached:
+                return self._format_weather_cache(cached, forecast=True)
         try:
             geo = requests.get(
                 "https://geocoding-api.open-meteo.com/v1/search",
@@ -1169,7 +1293,7 @@ class APIScout:
                 params={
                     "latitude": place["latitude"],
                     "longitude": place["longitude"],
-                    "daily": "temperature_2m_max,temperature_2m_min",
+                    "daily": "temperature_2m_max,temperature_2m_min,precipitation_probability_max,rain_sum",
                     "timezone": "auto",
                     "forecast_days": 2,
                 },
@@ -1181,16 +1305,20 @@ class APIScout:
             dates = daily.get("time", [])
             maxes = daily.get("temperature_2m_max", [])
             mins = daily.get("temperature_2m_min", [])
+            rain_probs = daily.get("precipitation_probability_max", [])
+            rain_sums = daily.get("rain_sum", [])
             if len(dates) < 2:
                 return None
-            return self._format_live_bullets(
-                [
-                    f"Forecast for {place['name']}, {place.get('admin1', place.get('country', ''))} on {dates[1]}",
-                    f"High: {round(float(maxes[1]))}°C",
-                    f"Low: {round(float(mins[1]))}°C",
-                ],
-                "Open-Meteo",
-            )
+            lines = [
+                f"Forecast for {place['name']}, {place.get('admin1', place.get('country', ''))} on {dates[1]}",
+                f"High: {round(float(maxes[1]))}°C",
+                f"Low: {round(float(mins[1]))}°C",
+            ]
+            if len(rain_probs) > 1 and rain_probs[1] is not None:
+                lines.append(f"Rain chance: {round(float(rain_probs[1]))}%")
+            if len(rain_sums) > 1 and rain_sums[1] is not None:
+                lines.append(f"Expected rain: {float(rain_sums[1]):.1f} mm")
+            return self._format_live_bullets(lines, "Open-Meteo")
         except Exception as e:
             logger.warning(f"⚠️ APIScout weather forecast handler failed for '{location}': {e}")
             return None
@@ -1362,7 +1490,7 @@ class APIScout:
         return None
 
     def _handle_top_news_query(self, query: str | None = None) -> str | None:
-        cached = self.db.get_curated_topic("global", "News", "top_today", limit=self._extract_requested_count(query or "", default=3, minimum=3, maximum=10))
+        cached = self.db.get_curated_topic("global", "News", "top_today", limit=self._extract_requested_count(query or "", default=5, minimum=3, maximum=10))
         if cached:
             return self._format_curated_cache(cached, "OpenClaw curated cache")
         try:
@@ -1375,7 +1503,7 @@ class APIScout:
             data = res.json()
 
             preferred_sections = ["US", "World", "Business", "Technology", "Science", "Sports"]
-            limit = self._extract_requested_count(query or "", default=3, minimum=3, maximum=10)
+            limit = self._extract_requested_count(query or "", default=5, minimum=3, maximum=10)
             headlines = OrderedDict()
             for section in preferred_sections:
                 for item in data.get(section, []):
@@ -1565,10 +1693,14 @@ class APIScout:
 
         if category == "Weather":
             location = self._extract_weather_location(normalized)
+            if not location and self._is_general_weather_query(normalized):
+                location = self._get_default_weather_location()
+                if not location:
+                    return "__ASK_WEATHER_LOCATION__"
             if location:
                 if self._is_weather_forecast_query(normalized):
-                    return self._handle_weather_forecast_query(location)
-                return self._handle_weather_query(location)
+                    return self._handle_weather_forecast_query(location) or "__WEATHER_UNAVAILABLE__"
+                return self._handle_weather_query(location) or "__WEATHER_UNAVAILABLE__"
 
         if category == "Government":
             if self._is_holiday_date_query(normalized):
@@ -1624,7 +1756,7 @@ class APIScout:
         
         # Some categories need a structured category-specific handler. If that
         # did not return usable data, let the router fall back to web search.
-        if category in {"News", "Social", "Sports & Fitness", "Government", "Entertainment", "Development", "Phone"}:
+        if category in {"News", "Social", "Sports & Fitness", "Government", "Entertainment", "Development", "Phone", "Weather"}:
             return None
 
         # 2. Get Working APIs
