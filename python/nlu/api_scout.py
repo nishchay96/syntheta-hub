@@ -14,7 +14,7 @@ from urllib.parse import quote_plus
 import xml.etree.ElementTree as ET
 import pandas as pd
 from core.database_manager import DatabaseManager
-from services.config import GLOBAL_WEATHER_CITY
+from services.config import GLOBAL_WEATHER_CITY, GLOBAL_WEATHER_FALLBACK_CITY
 
 logger = logging.getLogger("APIScout")
 
@@ -433,8 +433,8 @@ class APIScout:
         return any(term in q for term in ["weather", "forecast", "temperature", "rain", "aqi", "air quality"])
 
     def _detect_default_weather_location(self) -> str | None:
-        try:
-            for url in ["https://ipwho.is/", "https://ipapi.co/json/"]:
+        for url in ["https://ipwho.is/", "https://ipapi.co/json/"]:
+            try:
                 res = requests.get(url, timeout=6.0, headers={"User-Agent": "Mozilla/5.0"})
                 res.raise_for_status()
                 data = res.json()
@@ -442,8 +442,10 @@ class APIScout:
                 region = (data.get("region") or data.get("region_name") or data.get("admin1") or "").strip()
                 if city:
                     return f"{city}, {region}".strip(", ") if region else city
-        except Exception:
-            return None
+            except Exception:
+                continue
+        if GLOBAL_WEATHER_FALLBACK_CITY:
+            return GLOBAL_WEATHER_FALLBACK_CITY
         return None
 
     def _get_default_weather_location(self) -> str | None:
@@ -962,20 +964,64 @@ class APIScout:
     def _topic_cache_key(self, topic: str) -> str:
         return re.sub(r"[^a-z0-9]+", "_", topic.lower()).strip("_")
 
-    def _format_curated_cache(self, items: list[dict], source_label: str) -> str | None:
+    def _format_curated_cache(self, items: list[dict], source_label: str, include_snippets: bool = False) -> str | None:
         if not items:
             return None
         lines = []
         for item in items:
             title = (item.get("title") or "").strip()
+            snippet = (item.get("snippet") or "").strip()
             source = (item.get("source_name") or "").strip()
             if not title:
                 continue
+            line = title
+            if include_snippets and snippet:
+                line = f"{line} - {snippet}"
             if source:
-                lines.append(f"{title} ({source})")
-            else:
-                lines.append(title)
+                line = f"{line} ({source})"
+            lines.append(line)
         return self._format_live_bullets(lines, source_label) if lines else None
+
+    def _search_cached_news_items(self, query: str, items: list[dict]) -> list[dict]:
+        normalized_query = self._normalize_query(query)
+        query_terms = {
+            term for term in re.findall(r"[a-z0-9]+", normalized_query)
+            if len(term) > 2 and term not in {"news", "detail", "details", "detailed", "explain", "full", "update", "what", "happened"}
+        }
+        ranked = []
+        for item in items or []:
+            title = (item.get("title") or "").strip()
+            snippet = (item.get("snippet") or "").strip()
+            haystack = self._normalize_query(f"{title} {snippet}")
+            if not haystack:
+                continue
+            score = 0
+            if normalized_query and normalized_query in haystack:
+                score += 100
+            if title and self._normalize_query(title) in normalized_query:
+                score += 80
+            score += sum(1 for term in query_terms if term in haystack)
+            if score > 0:
+                ranked.append((score, item))
+        ranked.sort(key=lambda pair: pair[0], reverse=True)
+        return [item for _, item in ranked]
+
+    def _format_news_detail_item(self, item: dict, source_label: str) -> str | None:
+        title = (item.get("title") or "").strip()
+        if not title:
+            return None
+        snippet = (item.get("snippet") or "").strip()
+        source = (item.get("source_name") or "").strip()
+        payload = item.get("payload_json") or {}
+        section = (payload.get("section") or payload.get("topic") or "").strip() if isinstance(payload, dict) else ""
+        lines = [title]
+        if snippet:
+            lines.append(snippet)
+        if source:
+            lines.append(f"Reported by: {source}")
+        if section:
+            lines.append(f"Section: {section}")
+        return self._format_live_bullets(lines, source_label)
 
     def _handle_detailed_news_query(self, query: str) -> str | None:
         cleaned = self._normalize_query(query)
@@ -985,10 +1031,14 @@ class APIScout:
         if self.current_user and self.current_user != "guest":
             cached_user = self.db.get_curated_topic("user", "News", self._topic_cache_key(cleaned or query), user_id=self.current_user, limit=4)
             if cached_user:
-                return self._format_curated_cache(cached_user, "OpenClaw curated user cache")
+                return self._format_curated_cache(cached_user, "OpenClaw curated user cache", include_snippets=True)
         cached = self.db.get_curated_topic("global", "News", self._topic_cache_key(cleaned or query), limit=4)
         if cached:
-            return self._format_curated_cache(cached, "OpenClaw curated cache")
+            return self._format_curated_cache(cached, "OpenClaw curated cache", include_snippets=True)
+        top_cached = self.db.get_curated_topic("global", "News", "top_today", limit=10)
+        top_matches = self._search_cached_news_items(cleaned or query, top_cached)
+        if top_matches:
+            return self._format_news_detail_item(top_matches[0], "OpenClaw curated cache")
         items = self._fetch_google_news_rss(cleaned or self._normalize_query(query), limit=4)
         if not items:
             return None
@@ -1492,7 +1542,7 @@ class APIScout:
     def _handle_top_news_query(self, query: str | None = None) -> str | None:
         cached = self.db.get_curated_topic("global", "News", "top_today", limit=self._extract_requested_count(query or "", default=5, minimum=3, maximum=10))
         if cached:
-            return self._format_curated_cache(cached, "OpenClaw curated cache")
+            return self._format_curated_cache(cached, "OpenClaw curated cache", include_snippets=True)
         try:
             res = requests.get(
                 "https://ok.surf/api/v1/cors/news-feed",
@@ -1510,7 +1560,10 @@ class APIScout:
                     title = (item.get("title") or "").strip()
                     source = (item.get("source") or "").strip()
                     if title and title not in headlines:
-                        headlines[title] = source or section
+                        headlines[title] = {
+                            "source": source or section,
+                            "snippet": (item.get("description") or "").strip(),
+                        }
                     if len(headlines) >= limit:
                         break
                 if len(headlines) >= limit:
@@ -1519,10 +1572,16 @@ class APIScout:
             if not headlines:
                 return None
 
-            lines = [
-                f"{title} ({source})"
-                for title, source in list(headlines.items())[:limit]
-            ]
+            lines = []
+            for title, meta in list(headlines.items())[:limit]:
+                line = title
+                snippet = (meta.get("snippet") or "").strip()
+                source = (meta.get("source") or "").strip()
+                if snippet:
+                    line = f"{line} - {snippet}"
+                if source:
+                    line = f"{line} ({source})"
+                lines.append(line)
             return self._format_live_bullets(lines, "ok.surf news feed")
         except Exception as e:
             logger.warning(f"⚠️ APIScout news handler failed: {e}")

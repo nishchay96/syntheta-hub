@@ -22,12 +22,12 @@ UI_MODEL        = "llama3.2:3b"          # Main brain — hot in GPU
 OLLAMA_API_URL  = "http://localhost:11434/api/generate"
 OLLAMA_CHAT_URL = "http://localhost:11434/api/chat"
 
-# Token limits per route — keep responses tight for voice
+# Token limits per route — allow richer answers when detail is requested
 TOKEN_LIMITS = {
-    "general_web_search": 250,   # synthesise web data, heavily truncated
-    "general_no_web":     75,    # Conversational — stay snappy
-    "sql_metrics":        100,
-    "default":            100,
+    "general_web_search": 700,
+    "general_no_web":     220,
+    "sql_metrics":        180,
+    "default":            220,
 }
 
 
@@ -165,6 +165,7 @@ class OllamaBridge:
         history     = packet.get('history',     '')
         memory_tank = packet.get('memory_tank', '')
         memory_ctx  = packet.get('memory_context', '')
+        route_taken = packet.get('route_taken', 'general_no_web')
         today_str   = datetime.now().strftime('%A, %B %d, %Y')
 
         # Combine memory sources — context (JSON bucket facts) first,
@@ -175,6 +176,12 @@ class OllamaBridge:
         if memory_tank:
             memory_block += f"ADDITIONAL CONTEXT:\n{memory_tank}\n"
 
+        brevity_rule = (
+            "4. Keep your spoken response concise by default. If the user explicitly asks for details, explanation, summary, or a list of headlines, you may answer in 3-6 sentences with the key specifics."
+            if route_taken == "general_web_search"
+            else "4. Keep your spoken response concise by default. Use 1-3 short sentences unless the user asks for more detail."
+        )
+
         return f"""{role}
 
 ### TODAY'S DATE: {today_str}
@@ -183,7 +190,7 @@ class OllamaBridge:
 1. You are a voice assistant. Speak naturally and warmly.
 2. NEVER mention your "memory", "database", "context window", or internal systems.
 3. NEVER say "I will remember this." Background systems handle this invisibly.
-4. Keep your spoken "response" EXTREMELY concise. Under 2 short sentences. Max 20 words. Time is of the essence.
+{brevity_rule}
 5. If the user asks about themselves, use the MEMORY provided below without attribution.
 6. Use TODAY'S DATE above to give time-aware answers. Never guess outdated information.
 7. Output STRICTLY in the JSON format below.

@@ -8,7 +8,7 @@ import requests
 
 from core.database_manager import DatabaseManager
 from nlu.api_scout import APIScout
-from services.config import GLOBAL_WEATHER_CITY, KNOWLEDGE_VAULT_PATH
+from services.config import GLOBAL_WEATHER_CITY, GLOBAL_WEATHER_FALLBACK_CITY, KNOWLEDGE_VAULT_PATH
 
 logger = logging.getLogger("OpenClawWorker")
 
@@ -268,6 +268,8 @@ class OpenClawWorker:
                     return f"{city}, {region}".strip(", ") if region else city
             except Exception:
                 continue
+        if GLOBAL_WEATHER_FALLBACK_CITY:
+            return GLOBAL_WEATHER_FALLBACK_CITY
         return None
 
     def _refresh_user_interest_news(self, user_id: str, high_priority: bool = False):

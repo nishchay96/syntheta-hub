@@ -14,13 +14,46 @@ class ContextAssembler:
         from services.config import KNOWLEDGE_VAULT_PATH
         self.vault_path = vault_path or KNOWLEDGE_VAULT_PATH
 
+    def _user_dir(self, user_id):
+        if not user_id:
+            return self.vault_path
+        return os.path.join(self.vault_path, str(user_id).lower())
+
+    def _format_node_context(self, bucket, node_name, attrs):
+        if isinstance(attrs, dict):
+            detail = ", ".join(f"{k}: {v}" for k, v in attrs.items())
+        else:
+            detail = str(attrs)
+        return f"[{bucket}] {node_name}: {detail}"
+
+    def _get_exact_node_context(self, user_id, matched_memory_node):
+        if not user_id or not matched_memory_node or "::" not in matched_memory_node:
+            return ""
+        bucket, node_name = matched_memory_node.split("::", 1)
+        json_path = os.path.join(self._user_dir(user_id), f"Bucket_{bucket.replace(' ', '_')}.json")
+        if not os.path.exists(json_path):
+            return ""
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            nodes = data.get("nodes", {})
+            if node_name in nodes:
+                return self._format_node_context(bucket, node_name, nodes[node_name])
+            target = node_name.lower().strip()
+            for existing_name, attrs in nodes.items():
+                if str(existing_name).lower().strip() == target:
+                    return self._format_node_context(bucket, existing_name, attrs)
+        except Exception as e:
+            logger.warning(f"Failed to read exact node from {json_path}: {e}")
+        return ""
+
     # =========================================================
     # 🟢 PRIMARY: JSON node-level retrieval (real-time facts)
     # Reads Bucket_*.json files written by RealtimeMemoryCapture
     # Returns only the specific nodes relevant to the query
     # — not entire bucket dumps
     # =========================================================
-    def _search_knowledge_json(self, query, top_k=2):
+    def _search_knowledge_json(self, query, top_k=2, user_id=None):
         """
         Node-level semantic retrieval from JSON bucket files.
         Scores each node individually against query words.
@@ -28,7 +61,8 @@ class ContextAssembler:
         Covers facts captured in the current session immediately
         without waiting for NightWatchman to run.
         """
-        if not os.path.exists(self.vault_path):
+        user_dir = self._user_dir(user_id)
+        if not os.path.exists(user_dir):
             return ""
 
         stop_words = {
@@ -45,9 +79,8 @@ class ContextAssembler:
 
         scored_nodes = []
 
-        for json_file in glob.glob(
-                os.path.join(self.vault_path, "**", "Bucket_*.json"),
-                recursive=True):
+        pattern = os.path.join(user_dir, "Bucket_*.json")
+        for json_file in glob.glob(pattern):
             try:
                 with open(json_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
@@ -68,15 +101,7 @@ class ContextAssembler:
                         for w in query_words
                     )
                     if score > 0:
-                        if isinstance(attrs, dict):
-                            detail = ", ".join(
-                                f"{k}: {v}" for k, v in attrs.items()
-                            )
-                        else:
-                            detail = str(attrs)
-                        scored_nodes.append(
-                            (score, f"[{bucket}] {node_name}: {detail}")
-                        )
+                        scored_nodes.append((score, self._format_node_context(bucket, node_name, attrs)))
             except Exception as e:
                 logger.warning(f"Failed to read {json_file}: {e}")
 
@@ -90,7 +115,7 @@ class ContextAssembler:
     # Used as fallback when JSON nodes return nothing
     # Contains richer narrative context from past sessions
     # =========================================================
-    def _search_knowledge_graph(self, query, core_facts, top_k=2):
+    def _search_knowledge_graph(self, query, target_buckets=None, top_k=2, user_id=None):
         """
         Bucket-level keyword retrieval from markdown narrative files.
         Falls back to this when JSON node search returns empty.
@@ -111,19 +136,12 @@ class ContextAssembler:
         if not query_words:
             return ""
 
-        target_buckets = set()
+        target_buckets = set(target_buckets or [])
         snippets = []
 
-        # Direct bucket routing via SQL fact keys
-        for key, data in core_facts.items():
-            key_words = key.split('_')
-            if any(w in query_words for w in key_words):
-                target_buckets.add(
-                    data.get("bucket", "General").title().replace(" ", "_")
-                )
-
+        profile_dir = self._user_dir(user_id) if user_id else None
         for bucket in target_buckets:
-            filepath = os.path.join(self.vault_path, f"Bucket_{bucket}.md")
+            filepath = os.path.join(profile_dir, f"Bucket_{bucket}.md") if profile_dir else ""
             if os.path.exists(filepath):
                 try:
                     with open(filepath, 'r', encoding='utf-8') as f:
@@ -134,7 +152,8 @@ class ContextAssembler:
 
         # Fallback: full-text scan across all .md files
         if not snippets:
-            for root, _, files in os.walk(self.vault_path):
+            scan_root = profile_dir if profile_dir and os.path.exists(profile_dir) else self.vault_path
+            for root, _, files in os.walk(scan_root):
                 for file in files:
                     if not file.endswith(".md"):
                         continue
@@ -172,13 +191,13 @@ class ContextAssembler:
     # =========================================================
     # MAIN ENTRY — called by engine._handle_normal_command()
     # =========================================================
-    def build_context_string(self, user_id, user_input="", recent_queries=None):
+    def build_context_string(self, user_id, user_input="", recent_queries=None, matched_memory_node=None):
         """
         Assembles context block injected into GoldenPacket.
         Three layers:
           1. System clock
-          2. User profile from SQL core_memory
-          3. Memory retrieval — JSON nodes first, MD narrative fallback
+          2. Recent session timeline
+          3. Targeted memory retrieval — exact matched node first, then JSON/MD search
         """
         context_blocks = []
         now = datetime.now()
@@ -198,27 +217,19 @@ class ContextAssembler:
                 + "\n".join([f"- {e}" for e in recent_queries[-5:]])
             )
 
-        # 3. User profile from SQL core_memory (NightWatchman writes this)
-        core_facts = self.db.get_all_core_facts(user_id)
-        if core_facts:
-            profile_lines = []
-            for k, data in core_facts.items():
-                val    = data.get("value", "")
-                bucket = data.get("bucket", "General")
-                profile_lines.append(f"- {k.upper()}: {val} [Bucket: {bucket}]")
-            context_blocks.append(
-                "--- USER PROFILE ---\n" + "\n".join(profile_lines)
-            )
-
-        # 4. Memory retrieval — JSON nodes (real-time) + MD narrative (deep)
+        # 3. Memory retrieval — exact matched node, then JSON nodes, then MD fallback
         if user_input:
-            # Primary: JSON node-level (covers current session immediately)
-            knowledge_context = self._search_knowledge_json(user_input, top_k=2)
+            knowledge_context = self._get_exact_node_context(user_id, matched_memory_node)
+            if not knowledge_context:
+                knowledge_context = self._search_knowledge_json(user_input, top_k=2, user_id=user_id)
 
             # Fallback: markdown narrative (covers past sessions via NightWatchman)
             if not knowledge_context:
+                target_buckets = set()
+                if matched_memory_node and "::" in matched_memory_node:
+                    target_buckets.add(matched_memory_node.split("::", 1)[0].replace(" ", "_"))
                 knowledge_context = self._search_knowledge_graph(
-                    user_input, core_facts, top_k=2)
+                    user_input, target_buckets=target_buckets, top_k=2, user_id=user_id)
 
             if knowledge_context:
                 context_blocks.append(

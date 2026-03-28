@@ -255,11 +255,43 @@ class RealtimeMemoryCapture:
                     if any(re.search(pattern, val_norm.lower()) for pattern in NON_DURABLE_PATTERNS):
                         continue
                     filtered_attrs[key_norm] = val_norm
+                node_norm = self._normalize_node_name(node_norm, filtered_attrs, bucket_name)
+                node_low = node_norm.lower().replace("_", " ")
+                if not node_norm or node_low in NODE_STOPWORDS:
+                    continue
                 if filtered_attrs:
                     cleaned[node_norm] = filtered_attrs
             elif str(attrs).strip():
                 cleaned[node_norm] = attrs
         return cleaned
+
+    def _normalize_node_name(self, node_name: str, attrs: dict, bucket_name: str) -> str:
+        normalized = str(node_name or "").strip()
+        if not normalized:
+            return ""
+        low = normalized.lower().replace("_", " ")
+        generic_names = {"fact", "item", "device", "thing", "entry", "record"}
+        if low not in generic_names:
+            return normalized
+
+        entity = str((attrs or {}).get("Entity") or "").strip()
+        if entity:
+            return entity
+
+        text = str((attrs or {}).get("Text") or (attrs or {}).get("Detail") or "").strip()
+        if text:
+            if bucket_name == "Devices":
+                candidates = re.findall(r"\b[A-Za-z][A-Za-z0-9.+-]*(?:\s+[A-Za-z0-9.+-]+){0,3}\b", text)
+                for candidate in candidates:
+                    candidate = candidate.strip(" .,")
+                    candidate_low = candidate.lower()
+                    if candidate_low in {"i", "my", "the", "this", "that"}:
+                        continue
+                    if any(ch.isdigit() for ch in candidate) or re.search(r"\b(iphone|samsung|pixel|oneplus|xiaomi|macbook|ipad|airpods)\b", candidate_low):
+                        return candidate
+            words = text.split()
+            return " ".join(words[:4]).strip(" .,")
+        return normalized
 
     # ----------------------------------------------------------
     # BACKGROUND PIPELINE — full 4-stage pipeline from tester
@@ -594,7 +626,7 @@ Output the COMPLETE updated nodes dict. Raw JSON only."""
                 logger.info("[Gate] All new nodes rejected — preserving existing.")
                 return existing_nodes
             else:
-                return {}
+                return self._build_minimal_node(fact_summary, bucket_name)
 
         return validated
 

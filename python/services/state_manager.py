@@ -20,6 +20,7 @@ logger = logging.getLogger("StateManager")
 SUMMARIZER_MODEL = "llama3.2:1b"    # Lightweight — background only
 OLLAMA_CHAT_URL  = "http://localhost:11434/api/chat"
 MAX_HISTORY_PAIRS = 8               # Pairs before 1B summarizer fires
+PACKET_HISTORY_PAIRS = 3            # Pairs injected into GoldenPacket after summarization
 
 
 class EngineState:
@@ -69,6 +70,7 @@ class EngineState:
         self.pending_weather = {}  # {sat_id: {"kind": "aqi|weather|forecast|rain"}}
         self.last_weather_location = {}  # {sat_id: "City, Region"}
         self.last_live_context = {}  # {sat_id: {"query": str, "items": [str, ...]}}
+        self.last_news_briefing = {}  # {sat_id: {"query": str, "items": [{"title": str, "summary": str, "source": str}]}}
 
     # ----------------------------------------------------------
     # IDENTITY & PROFILE MANAGEMENT
@@ -198,6 +200,28 @@ class EngineState:
 
     def get_last_live_context(self, sat_id: int):
         return self.last_live_context.get(sat_id)
+
+    def set_last_news_briefing(self, sat_id: int, query: str, items: list[dict]):
+        cleaned_items = []
+        for item in items or []:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or "").strip()
+            if not title:
+                continue
+            cleaned_items.append({
+                "title": title,
+                "summary": str(item.get("summary") or "").strip(),
+                "source": str(item.get("source") or "").strip(),
+            })
+        if cleaned_items:
+            self.last_news_briefing[sat_id] = {
+                "query": query or "",
+                "items": cleaned_items,
+            }
+
+    def get_last_news_briefing(self, sat_id: int):
+        return self.last_news_briefing.get(sat_id)
 
     def needs_identity_prompt(self, sat_id: int) -> bool:
         """Returns True if it's a Guest and we haven't nagged them yet today."""
@@ -332,7 +356,8 @@ class EngineState:
         if summary:
             history_parts.append(f"[Earlier context]: {summary}")
 
-        for turn in state["history_buffer"]:
+        recent_turns = state["history_buffer"][-(PACKET_HISTORY_PAIRS * 2):]
+        for turn in recent_turns:
             history_parts.append(
                 f"{turn['role'].upper()}: {turn['content']}")
 

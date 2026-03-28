@@ -165,13 +165,64 @@ class SynthetaEngine:
             return None
 
         numbered = [f"{i}. {item}" for i, item in enumerate(bullets[:requested], start=1)]
-        return "Here are the top {} items for today: {}".format(requested, " ".join(numbered))
+        return "Here are the top {} items for today:\n{}".format(requested, "\n".join(numbered))
 
     def _direct_live_failure_reply(self, text: str, packet: dict) -> str | None:
         if not packet.get("live_lookup_failed"):
             return None
         query = packet.get("failed_web_query") or text
         return f"I couldn't fetch live current data for '{query}' right now because web retrieval is unavailable. Please try again later."
+
+    def _is_news_query(self, text: str) -> bool:
+        normalized = re.sub(r"\s+", " ", (text or "").lower()).strip()
+        return "news" in normalized or "headline" in normalized
+
+    def _is_news_listing_query(self, text: str) -> bool:
+        normalized = re.sub(r"\s+", " ", (text or "").lower()).strip()
+        listing_terms = ["top news", "headlines", "latest news", "news today", "top headlines", "top 10", "top 5"]
+        return self._is_news_query(normalized) and any(term in normalized for term in listing_terms)
+
+    def _extract_news_selection(self, text: str, count: int) -> int | None:
+        normalized = re.sub(r"\s+", " ", (text or "").lower()).strip()
+        for pattern in [
+            r"\b(?:item|news|headline|story|article)\s*(\d{1,2})\b",
+            r"\bnumber\s*(\d{1,2})\b",
+            r"\b(\d{1,2})\b",
+        ]:
+            match = re.search(pattern, normalized)
+            if match:
+                idx = int(match.group(1))
+                if 1 <= idx <= count:
+                    return idx - 1
+        ordinals = {
+            "first": 0, "second": 1, "third": 2, "fourth": 3, "fifth": 4,
+            "sixth": 5, "seventh": 6, "eighth": 7, "ninth": 8, "tenth": 9,
+        }
+        for word, idx in ordinals.items():
+            if re.search(rf"\b{word}\b", normalized) and idx < count:
+                return idx
+        return None
+
+    def _direct_news_reply(self, text: str, packet: dict) -> str | None:
+        memory_tank = packet.get("memory_tank") or ""
+        route = packet.get("route_taken")
+        if route != "general_web_search" or "--- LIVE WEB" not in memory_tank or not self._is_news_listing_query(text):
+            return None
+
+        requested = self._extract_requested_count(text)
+        bullets = []
+        for line in memory_tank.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("• ") and not stripped.startswith("• Source:"):
+                bullets.append(stripped[2:].strip())
+        if not bullets:
+            return None
+
+        limit = requested or min(5, len(bullets))
+        limit = max(1, min(limit, len(bullets)))
+        intro = "Here are the top news items for today:" if requested is None else f"Here are the top {limit} news items for today:"
+        numbered = [f"{i}. {item}" for i, item in enumerate(bullets[:limit], start=1)]
+        return intro + "\n" + "\n".join(numbered)
 
     def _direct_weather_location_reply(self, packet: dict) -> str | None:
         if packet.get("web_data") != "__ASK_WEATHER_LOCATION__":
@@ -668,6 +719,53 @@ class SynthetaEngine:
         if bullets:
             self.state.set_last_live_context(sat_id, query, bullets)
 
+    def _capture_news_briefing(self, sat_id: int, query: str, memory_tank: str):
+        if not self._is_news_query(query) or "--- LIVE WEB" not in (memory_tank or ""):
+            return
+        items = []
+        for line in memory_tank.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("• ") or stripped.startswith("• Source:"):
+                continue
+            raw = stripped[2:].strip()
+            source = ""
+            source_match = re.search(r"\s+\(([^()]*)\)\s*$", raw)
+            if source_match:
+                source = source_match.group(1).strip()
+                raw = raw[:source_match.start()].strip()
+            title, summary = raw, ""
+            if " - " in raw:
+                title, summary = raw.split(" - ", 1)
+            items.append({
+                "title": title.strip(),
+                "summary": summary.strip(),
+                "source": source,
+            })
+        if items:
+            self.state.set_last_news_briefing(sat_id, query, items)
+
+    def _apply_news_followup(self, sat_id: int, text: str) -> str:
+        briefing = self.state.get_last_news_briefing(sat_id) or {}
+        items = briefing.get("items") or []
+        if not items:
+            return text
+        normalized = re.sub(r"\s+", " ", (text or "").lower()).strip(" ?!.,")
+        if not normalized:
+            return text
+
+        selection = self._extract_news_selection(normalized, len(items))
+        if selection is not None:
+            return f"explain this news in detail: {items[selection]['title']}"
+
+        detail_terms = ["explain", "detail", "details", "detailed", "expand", "summarize", "summary", "what happened", "tell me more"]
+        if any(term in normalized for term in detail_terms):
+            for item in items:
+                title_norm = re.sub(r"[^a-z0-9\s]+", " ", item.get("title", "").lower())
+                title_terms = [term for term in title_norm.split() if len(term) > 3]
+                if title_terms and any(term in normalized for term in title_terms[:5]):
+                    return f"explain this news in detail: {item['title']}"
+        return text
+
     def _queue_profile_creation(self, sat_id: int, candidate_name: str):
         self.state.set_pending_identity(sat_id, candidate_name)
         current_user = self.state.get_active_user(sat_id)
@@ -689,6 +787,7 @@ class SynthetaEngine:
         current_session_id = self.state.session_start_time
         text = self._apply_pending_weather_followup(sat_id, text)
         text = self._apply_weather_location_reuse(sat_id, text)
+        text = self._apply_news_followup(sat_id, text)
         text = self._apply_live_followup(sat_id, text)
 
         # 🟢 IDENTITY LOGIC REFINEMENT (Load vs Create)
@@ -847,8 +946,8 @@ class SynthetaEngine:
             if turn.get("role") == "user" and turn.get("content")
         ]
 
-        # 🟢 CONSOLIDATED CONTEXT: build against the active session timeline
-        memory_ctx = self.assembler.build_context_string(
+        # Pre-route context stays lightweight: recent timeline + user-scoped node search only.
+        pre_route_memory_ctx = self.assembler.build_context_string(
             active_user,
             text,
             recent_queries=recent_queries,
@@ -863,12 +962,20 @@ class SynthetaEngine:
             sat_id,
             text,
             "neutral",
-            memory_context=memory_ctx
+            memory_context=pre_route_memory_ctx
         )
 
 
         packet = self.librarian.enrich_packet(packet)
         resolved_input = packet.get('input', text)
+
+        if packet.get('needs_memory') or packet.get('matched_memory_node') or packet.get('route_taken') != "general_web_search":
+            packet['memory_context'] = self.assembler.build_context_string(
+                active_user,
+                resolved_input,
+                recent_queries=recent_queries,
+                matched_memory_node=packet.get('matched_memory_node'),
+            )
 
         if packet.get('route_taken') == "general_web_search" and not packet.get('needs_memory'):
             packet['memory_context'] = ""
@@ -892,6 +999,7 @@ class SynthetaEngine:
 
         try:
             self._capture_live_context(sat_id, resolved_input, packet.get("memory_tank") or "")
+            self._capture_news_briefing(sat_id, resolved_input, packet.get("memory_tank") or "")
             direct_weather_location = self._direct_weather_location_reply(packet)
             if direct_weather_location:
                 self.state.set_pending_weather(sat_id, self._infer_weather_kind(resolved_input))
@@ -921,16 +1029,25 @@ class SynthetaEngine:
                             "execute": None,
                         }
                     else:
-                        direct_live_reply = self._direct_counted_live_reply(resolved_input, packet)
-                        if direct_live_reply:
+                        direct_news_reply = self._direct_news_reply(resolved_input, packet)
+                        if direct_news_reply:
                             llm_response_dict = {
-                                "response": direct_live_reply,
-                                "active_subject": "live_list",
+                                "response": direct_news_reply,
+                                "active_subject": "news",
                                 "is_action": False,
                                 "execute": None,
                             }
                         else:
-                            llm_response_dict = self.llm.generate(packet)
+                            direct_live_reply = self._direct_counted_live_reply(resolved_input, packet)
+                            if direct_live_reply:
+                                llm_response_dict = {
+                                    "response": direct_live_reply,
+                                    "active_subject": "live_list",
+                                    "is_action": False,
+                                    "execute": None,
+                                }
+                            else:
+                                llm_response_dict = self.llm.generate(packet)
 
             if self.state.session_start_time != current_session_id:
                 logger.warning("🚫 Barge-in detected. Aborting stale response.")

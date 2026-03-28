@@ -1,5 +1,5 @@
 {
-  "last_updated": "2026-03-26T14:27:17.549001",
+  "last_updated": "2026-03-28T21:11:12.398690",
   "categories": {
     "Animals": [
       {
@@ -61,11 +61,6 @@
     ],
     "Blockchain": [
       {
-        "name": "Chainlink",
-        "url": "https://chain.link/developer-resources",
-        "description": "Build hybrid smart contracts with Chainlink"
-      },
-      {
         "name": "Chainpoint",
         "url": "https://tierion.com/chainpoint/",
         "description": "Chainpoint is a global network for anchoring data to the Bitcoin blockchain"
@@ -78,19 +73,19 @@
     ],
     "Books": [
       {
-        "name": "Quran",
-        "url": "https://quran.api-docs.io/",
-        "description": "RESTful Quran API with multiple languages"
+        "name": "Bible-api",
+        "url": "https://bible-api.com/",
+        "description": "Free Bible API with multiple languages"
       },
       {
-        "name": "Quran Cloud",
-        "url": "https://alquran.cloud/api",
-        "description": "A RESTful Quran API to retrieve an Ayah, Surah, Juz or the entire Holy Quran"
+        "name": "Gutendex",
+        "url": "https://gutendex.com/",
+        "description": "Web-API for fetching data from Project Gutenberg Books Library"
       },
       {
-        "name": "Thirukkural",
-        "url": "https://api-thirukkural.web.app/",
-        "description": "1330 Thirukkural poems and explanation in Tamil and English"
+        "name": "Open Library",
+        "url": "https://openlibrary.org/developers/api",
+        "description": "Books, book covers and related data"
       }
     ],
     "Business": [
@@ -98,11 +93,6 @@
         "name": "Domainsdb.info",
         "url": "https://domainsdb.info/",
         "description": "Registered Domain Names Search"
-      },
-      {
-        "name": "markerapi",
-        "url": "https://markerapi.com",
-        "description": "Trademark Search"
       }
     ],
     "Calendar": [
@@ -110,16 +100,6 @@
         "name": "Church Calendar",
         "url": "http://calapi.inadiutorium.cz/",
         "description": "Catholic liturgical calendar"
-      },
-      {
-        "name": "Hebrew Calendar",
-        "url": "https://www.hebcal.com/home/developer-apis",
-        "description": "Convert between Gregorian and Hebrew, fetch Shabbat and Holiday times, etc"
-      },
-      {
-        "name": "LectServe",
-        "url": "http://www.lectserve.com",
-        "description": "Protestant liturgical calendar"
       }
     ],
     "Cloud Storage & File Sharing": [
@@ -142,13 +122,18 @@
     "Cryptocurrency": [
       {
         "name": "CoinCap",
-        "url": "https://api.coincap.io/v2/assets/bitcoin",
-        "description": "Real time Bitcoin price and market cap"
+        "url": "https://docs.coincap.io/",
+        "description": "Real time Cryptocurrency prices through a RESTful API"
       },
       {
         "name": "Coinlore",
-        "url": "https://api.coinlore.net/api/ticker/?id=90",
-        "description": "Bitcoin market data"
+        "url": "https://www.coinlore.com/cryptocurrency-data-api",
+        "description": "Cryptocurrencies prices, volume and more"
+      },
+      {
+        "name": "Coinpaprika",
+        "url": "https://api.coinpaprika.com",
+        "description": "Cryptocurrencies prices, volume and more"
       }
     ],
     "Currency Exchange": [
@@ -158,14 +143,14 @@
         "description": "Free foreign exchange & crypto rates API"
       },
       {
-        "name": "Bank of Russia",
-        "url": "https://www.cbr.ru/development/SXML/",
-        "description": "Exchange rates and currency conversion"
-      },
-      {
         "name": "Currency-api",
         "url": "https://github.com/fawazahmed0/currency-api#readme",
         "description": "Free Currency Exchange Rates API with 150+ Currencies & No Rate Limits"
+      },
+      {
+        "name": "Economia.Awesome",
+        "url": "https://docs.awesomeapi.com.br/api-de-moedas",
+        "description": "Portuguese free currency prices and conversion with no rate limits"
       }
     ],
     "Data Validation": [
@@ -173,11 +158,6 @@
         "name": "Postman Echo",
         "url": "https://www.postman-echo.com",
         "description": "Test api server to receive and return value from HTTP method"
-      },
-      {
-        "name": "PurgoMalum",
-        "url": "http://www.purgomalum.com",
-        "description": "Content validator against profanity & obscenity"
       }
     ],
     "Development": [
@@ -214,50 +194,33 @@
         "description": "Collaborative dictionary data"
       }
     ],
-    "Documents & Productivity": [
-      {
-        "name": "Vector Express v2.0",
-        "url": "https://vector.express",
-        "description": "Free vector file converting API"
-      },
-      {
-        "name": "WakaTime",
-        "url": "https://wakatime.com/developers",
-        "description": "Automated time tracking leaderboards for programmers"
-      }
-    ],
     "Email": [
       {
-        "name": "Disify",
-        "url": "https://www.disify.com/",
-        "description": "Validate and detect disposable and temporary email addresses"
+        "name": "mail.tm",
+        "url": "https://docs.mail.tm",
+        "description": "Temporary Email Service"
       },
       {
-        "name": "DropMail",
-        "url": "https://dropmail.me/api/#live-demo",
-        "description": "GraphQL API for creating and managing ephemeral e-mail inboxes"
-      },
-      {
-        "name": "Guerrilla Mail",
-        "url": "https://www.guerrillamail.com/GuerrillaMailAPI.html",
-        "description": "Disposable temporary Email addresses"
+        "name": "MailCheck.ai",
+        "url": "https://www.mailcheck.ai/#documentation",
+        "description": "Prevent users to sign up with temporary email addresses"
       }
     ],
     "Entertainment": [
-      {
-        "name": "chucknorris.io",
-        "url": "https://api.chucknorris.io",
-        "description": "JSON API for hand curated Chuck Norris jokes"
-      },
       {
         "name": "Corporate Buzz Words",
         "url": "https://github.com/sameerkumar18/corporate-bs-generator-api",
         "description": "REST API for Corporate Buzz Words"
       },
       {
-        "name": "Fun Fact",
-        "url": "https://api.aakhilv.me",
-        "description": "A simple HTTPS api that can randomly select and return a fact from the FFA database"
+        "name": "Imgflip",
+        "url": "https://imgflip.com/api",
+        "description": "Gets an array of popular memes"
+      },
+      {
+        "name": "Meme Maker",
+        "url": "https://mememaker.github.io/API/",
+        "description": "REST API for create your own meme"
       }
     ],
     "Environment": [
@@ -284,48 +247,38 @@
         "description": "Public access to a database of IIN/BIN information"
       },
       {
-        "name": "Econdb",
-        "url": "https://www.econdb.com/api/",
-        "description": "Global macroeconomic data"
-      },
-      {
-        "name": "Fed Treasury",
-        "url": "https://fiscaldata.treasury.gov/api-documentation/",
-        "description": "U.S. Department of the Treasury Data"
+        "name": "Portfolio Optimizer",
+        "url": "https://portfoliooptimizer.io/",
+        "description": "Portfolio analysis and optimization"
       }
     ],
     "Food & Drink": [
-      {
-        "name": "BaconMockup",
-        "url": "https://baconmockup.com/",
-        "description": "Resizable bacon placeholder images"
-      },
       {
         "name": "Coffee",
         "url": "https://coffee.alexflipnote.dev/",
         "description": "Random pictures of coffee"
       },
       {
-        "name": "Foodish",
-        "url": "https://github.com/surhud004/Foodish#readme",
-        "description": "Random pictures of food dishes"
+        "name": "WhiskyHunter",
+        "url": "https://whiskyhunter.net/api/",
+        "description": "Past online whisky auctions statistical data"
       }
     ],
     "Games & Comics": [
       {
-        "name": "Animal Crossing: New Horizons",
-        "url": "http://acnhapi.com/",
-        "description": "API for critters, fossils, art, music, furniture and villagers"
+        "name": "Digimon Information",
+        "url": "https://digimon-api.vercel.app/",
+        "description": "Provides information about digimon creatures"
       },
       {
-        "name": "Autochess VNG",
-        "url": "https://github.com/didadadida93/autochess-vng-api",
-        "description": "Rest Api for Autochess VNG"
+        "name": "Digimon TCG",
+        "url": "https://documenter.getpostman.com/view/14059948/TzecB4fH",
+        "description": "Search for Digimon cards in digimoncard.io"
       },
       {
-        "name": "Barter.VG",
-        "url": "https://github.com/bartervg/barter.vg/wiki",
-        "description": "Provides information about Game, DLC, Bundles, Giveaways, Trading"
+        "name": "Disney",
+        "url": "https://disneyapi.dev",
+        "description": "Information of Disney characters"
       }
     ],
     "Geocoding": [
@@ -340,9 +293,9 @@
         "description": "Address database of France, geocoding and reverse"
       },
       {
-        "name": "Cartes.io",
-        "url": "https://github.com/M-Media-Group/Cartes.io/wiki/API",
-        "description": "Create maps and markers for anything"
+        "name": "GeoApi",
+        "url": "https://api.gouv.fr/api/geoapi.html",
+        "description": "French geographical data"
       }
     ],
     "Government": [
@@ -352,31 +305,31 @@
         "description": "Malaysia Central Bank Open Data"
       },
       {
-        "name": "BCLaws",
-        "url": "https://www.bclaws.gov.bc.ca/civix/template/complete/api/index.html",
-        "description": "Access to the laws of British Columbia"
+        "name": "Brazil Central Bank Open Data",
+        "url": "https://dadosabertos.bcb.gov.br/",
+        "description": "Brazil Central Bank Open Data"
       },
       {
-        "name": "Brazil",
-        "url": "https://brasilapi.com.br/",
-        "description": "Community driven API for Brazil Public Data"
+        "name": "Brazil Receita WS",
+        "url": "https://www.receitaws.com.br/",
+        "description": "Consult companies by CNPJ for Brazilian companies"
       }
     ],
     "Health": [
       {
-        "name": "Coronavirus",
-        "url": "https://pipedream.com/@pravin/http-api-for-latest-wuhan-coronavirus-data-2019-ncov-p_G6CLVM/readme",
-        "description": "HTTP API for Latest Covid-19 Data"
-      },
-      {
-        "name": "Coronavirus in the UK",
-        "url": "https://coronavirus.data.gov.uk/details/developers-guide",
-        "description": "UK Government coronavirus data, including deaths and cases by region"
-      },
-      {
         "name": "Covid Tracking Project",
         "url": "https://covidtracking.com/data/api/version-2",
         "description": "Covid-19  data for the US"
+      },
+      {
+        "name": "Covid-19",
+        "url": "https://github.com/M-Media-Group/Covid-19-API",
+        "description": "Covid 19 cases, deaths and recovery per country"
+      },
+      {
+        "name": "Covid-19 Datenhub",
+        "url": "https://npgeo-corona-npgeo-de.hub.arcgis.com",
+        "description": "Maps, datasets, applications and more in the context of COVID-19"
       }
     ],
     "Jobs": [
@@ -386,68 +339,36 @@
         "description": "API for Job board aggregator in Europe / Remote"
       },
       {
-        "name": "DevITjobs UK",
-        "url": "https://devitjobs.uk/job_feed.xml",
-        "description": "Jobs with GraphQL"
-      },
-      {
         "name": "Open Skills",
         "url": "https://github.com/workforce-data-initiative/skills-api/wiki/API-Overview",
         "description": "Job titles, skills and related jobs data"
       }
     ],
-    "Machine Learning": [
-      {
-        "name": "Deepcode",
-        "url": "https://www.deepcode.ai",
-        "description": "AI for code review"
-      },
-      {
-        "name": "EXUDE-API",
-        "url": "http://uttesh.com/exude-api/",
-        "description": "Used for the primary ways for filtering the stopping, stemming words from the text data"
-      }
-    ],
     "Music": [
-      {
-        "name": "Bandsintown",
-        "url": "https://app.swaggerhub.com/apis/Bandsintown/PublicAPI/3.0.0",
-        "description": "Music Events"
-      },
       {
         "name": "Gaana",
         "url": "https://github.com/cyberboysumanjay/GaanaAPI",
         "description": "API to retrieve song information from Gaana"
       },
       {
-        "name": "Genrenator",
-        "url": "https://binaryjazz.us/genrenator-api/",
-        "description": "Music genre generator"
+        "name": "JioSaavn",
+        "url": "https://github.com/cyberboysumanjay/JioSaavnAPI",
+        "description": "API to retrieve song information, album meta data and many more from JioSaavn"
+      },
+      {
+        "name": "Lyrics.ovh",
+        "url": "https://lyricsovh.docs.apiary.io",
+        "description": "Simple API to retrieve the lyrics of a song"
       }
     ],
     "News": [
       {
         "name": "Inshorts News",
-        "url": "https://inshorts.me/news/all?offset=0&limit=10",
-        "description": "General daily news in short format"
-      },
-      {
-        "name": "ok.surf News",
-        "url": "https://ok.surf/api/v1/cors/news-feed",
-        "description": "Global news feed across multiple categories"
-      },
-      {
-        "name": "Spaceflight News",
-        "url": "https://spaceflightnewsapi.net/api/v2/articles",
-        "description": "Spaceflight related news \ud83d\ude80"
+        "url": "https://github.com/cyberboysumanjay/Inshorts-News-API",
+        "description": "Provides news from inshorts"
       }
     ],
     "Open Data": [
-      {
-        "name": "Archive.org",
-        "url": "https://archive.readme.io/docs",
-        "description": "The Internet Archive"
-      },
       {
         "name": "BotsArchive",
         "url": "https://botsarchive.com/docs.html",
@@ -457,6 +378,11 @@
         "name": "Callook.info",
         "url": "https://callook.info",
         "description": "United States ham radio callsigns"
+      },
+      {
+        "name": "French Address Search",
+        "url": "https://geo.api.gouv.fr/adresse",
+        "description": "Address search via the French Government"
       }
     ],
     "Open Source Projects": [
@@ -466,14 +392,14 @@
         "description": "Countly web analytics"
       },
       {
-        "name": "Datamuse",
-        "url": "https://www.datamuse.com/api/",
-        "description": "Word-finding query engine"
-      },
-      {
         "name": "Evil Insult Generator",
         "url": "https://evilinsult.com/api",
         "description": "Evil Insults"
+      },
+      {
+        "name": "GitHub Contribution Chart Generator",
+        "url": "https://github-contributions.vercel.app",
+        "description": "Create an image of your GitHub contributions"
       }
     ],
     "Patent": [
@@ -514,14 +440,14 @@
         "description": "URL to screenshot"
       },
       {
-        "name": "Lorem Picsum",
-        "url": "https://picsum.photos/",
-        "description": "Images from Unsplash"
+        "name": "Readme typing SVG",
+        "url": "https://github.com/DenverCoder1/readme-typing-svg",
+        "description": "Customizable typing and deleting text SVG"
       },
       {
-        "name": "PlaceKeanu",
-        "url": "https://placekeanu.com/",
-        "description": "Resizable Keanu Reeves placeholder images with grayscale and young Keanu options"
+        "name": "ReSmush.it",
+        "url": "https://resmush.it/api",
+        "description": "Photo optimization"
       }
     ],
     "Science & Math": [
@@ -531,31 +457,31 @@
         "description": "Multiple astronomy data sources"
       },
       {
-        "name": "iDigBio",
-        "url": "https://github.com/idigbio/idigbio-search-api/wiki",
-        "description": "Access millions of museum specimens from organizations around the world"
-      },
-      {
         "name": "inspirehep.net",
         "url": "https://github.com/inspirehep/rest-api-doc",
         "description": "High Energy Physics info. system"
+      },
+      {
+        "name": "Launch Library 2",
+        "url": "https://thespacedevs.com/llapi",
+        "description": "Spaceflight launches and events database"
       }
     ],
     "Security": [
       {
-        "name": "EmailRep",
-        "url": "https://docs.emailrep.io/",
-        "description": "Email address threat and risk prediction"
-      },
-      {
-        "name": "Escape",
-        "url": "https://github.com/polarspetroll/EscapeAPI",
-        "description": "An API for escaping different kind of queries"
-      },
-      {
         "name": "FilterLists",
         "url": "https://filterlists.com",
         "description": "Lists of filters for adblockers and firewalls"
+      },
+      {
+        "name": "Microsoft Security Response Center (MSRC)",
+        "url": "https://msrc.microsoft.com/report/developer",
+        "description": "Programmatic interfaces to engage with the Microsoft Security Response Center (MSRC)"
+      },
+      {
+        "name": "Mozilla http scanner",
+        "url": "https://github.com/mozilla/http-observatory/blob/master/httpobs/docs/api.md",
+        "description": "Mozilla observatory http scanner"
       }
     ],
     "Social": [
@@ -604,9 +530,9 @@
         "description": "Generate random pixel-art avatars"
       },
       {
-        "name": "English Random Words",
-        "url": "https://random-words-api.vercel.app/word",
-        "description": "Generate English Random Words with Pronunciation"
+        "name": "FakerAPI",
+        "url": "https://fakerapi.it/en",
+        "description": "APIs collection to get fake data"
       }
     ],
     "Text Analysis": [
@@ -640,14 +566,14 @@
         "description": "Access real-time and historical data of any and all airborne aircraft"
       },
       {
-        "name": "airportsapi",
-        "url": "https://airport-web.appspot.com/api/docs/",
-        "description": "Get name and website-URL for airports by ICAO code"
-      },
-      {
         "name": "BC Ferries",
         "url": "https://www.bcferriesapi.ca",
         "description": "Sailing times and capacities for BC Ferries"
+      },
+      {
+        "name": "Icelandic APIs",
+        "url": "http://docs.apis.is/",
+        "description": "Open APIs that deliver services in or regarding Iceland"
       }
     ],
     "URL Shorteners": [
@@ -657,14 +583,14 @@
         "description": "A simple URL shortener"
       },
       {
-        "name": "CleanURI",
-        "url": "https://cleanuri.com/docs",
-        "description": "URL shortener service"
-      },
-      {
         "name": "Git.io",
         "url": "https://github.blog/2011-11-10-git-io-github-url-shortener/",
         "description": "Git.io URL shortener"
+      },
+      {
+        "name": "Mgnet.me",
+        "url": "http://mgnet.me/api.html",
+        "description": "Torrent URL shorten API"
       }
     ],
     "Vehicle": [
@@ -686,31 +612,31 @@
         "description": "Game Of Thrones API"
       },
       {
-        "name": "Breaking Bad Quotes",
-        "url": "https://github.com/shevabam/breaking-bad-quotes",
-        "description": "Some Breaking Bad quotes"
-      },
-      {
         "name": "Czech Television",
         "url": "http://www.ceskatelevize.cz/xml/tv-program/",
         "description": "TV programme of Czech TV"
+      },
+      {
+        "name": "Dune",
+        "url": "https://github.com/ywalia01/dune-api",
+        "description": "A simple API which provides you with book, character, movie and quotes JSON data"
       }
     ],
     "Weather": [
       {
         "name": "7Timer!",
-        "url": "http://www.7timer.info/bin/astro.php?lon=113.2&lat=23.1&ac=0&unit=metric&output=json",
-        "description": "Meteorological data and forecasts"
+        "url": "http://www.7timer.info/doc.php?lang=en",
+        "description": "Weather, especially for Astroweather"
       },
       {
         "name": "AviationWeather",
-        "url": "https://www.aviationweather.gov/cgi-bin/json/MetarJSON.php",
-        "description": "Real-time METAR weather reports"
+        "url": "https://www.aviationweather.gov/dataserver",
+        "description": "NOAA aviation weather forecasts and observations"
       },
       {
-        "name": "Hong Kong Observatory",
-        "url": "https://data.weather.gov.hk/weatherAPI/opendata/weather.php?dataType=fnd&lang=en",
-        "description": "9-day weather forecast"
+        "name": "Hong Kong Obervatory",
+        "url": "https://www.hko.gov.hk/en/abouthko/opendata_intro.htm",
+        "description": "Provide weather information, earthquake information, and climate data"
       }
     ]
   }
