@@ -261,6 +261,28 @@ class LibrarianRouter:
         best_k = max(scores, key=scores.get)
         return scores[best_k], best_k
 
+    def _personal_query_compatibility(self, query: str, personal_key: str | None) -> bool:
+        if not personal_key or "::" not in personal_key:
+            return False
+        bucket, node = personal_key.split("::", 1)
+        normalized = re.sub(r"[^a-z0-9\s]+", " ", query.lower())
+        query_terms = {
+            term for term in normalized.split()
+            if len(term) > 2 and term not in {"what", "which", "tell", "about", "have", "with", "your", "my", "use", "using"}
+        }
+        anchor_text = f"{bucket} {node}".lower()
+        if any(term in anchor_text for term in query_terms):
+            return True
+        if any(term in normalized for term in {"phone", "mobile", "device", "laptop", "computer", "tablet"}):
+            return bucket.lower() == "devices"
+        if any(term in normalized for term in {"like", "prefer", "favorite", "favourite"}):
+            return bucket.lower() in {"opinions", "hobbies"}
+        if any(term in normalized for term in {"family", "wife", "husband", "mother", "father", "friend"}):
+            return bucket.lower() == "people"
+        if any(term in normalized for term in {"work", "job", "office", "company"}):
+            return bucket.lower() == "work"
+        return False
+
     # ----------------------------------------------------------
     # TOPIC CLASSIFICATION (for filler selection)
     # Nomic only — must stay fast, called on every query
@@ -370,12 +392,16 @@ class LibrarianRouter:
             else:
                 decision = "general"
 
+        matched_node = None
+        if personal_key and personal_score >= CLEAR_LOW and self._personal_query_compatibility(query, personal_key):
+            matched_node = personal_key
+
         return {
             "decision":       decision,
             "web_score":      round(web_score, 3),
             "web_key":        web_key,
             "personal_score": round(personal_score, 3),
-            "matched_node":   personal_key,
+            "matched_node":   matched_node,
             "used_llm":       used_llm,
             "route_ms":       round((time.perf_counter() - t) * 1000, 1),
         }
@@ -980,11 +1006,12 @@ class LibrarianRouter:
             packet['needs_memory'] = True
 
         elif decision in ("web", "both"):
-            if decision == "both":
+            # 🟢 FIX: Ensure memory is fetched if the web query involves personal context
+            if decision == "both" or matched_node:
                 packet['needs_memory'] = True
 
-            # 🟢 Pass full memory context to optimizer so it can resolve things like "my phone"
-            mem_ctx_str = packet.get("memory_context", "")
+            # Only pass targeted personal context when we have a matched profile node.
+            mem_ctx_str = packet.get("memory_context", "") if matched_node else ""
             optimized = self._optimize_web_query(resolved_input, mem_ctx_str)
             
             # 🟢 APIScout first — check if we have a dedicated API for this query

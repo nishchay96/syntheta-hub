@@ -893,6 +893,9 @@ class MemoryWorker:
         self.db.reset_processing_tasks()
         threading.Thread(target=self._worker_loop, daemon=True).start()
 
+    def _get_nomic_vector(self, text):
+        return self.capture._get_nomic_vector(text)
+
     # ----------------------------------------------------------
     # IDLE CHECK — reads last_interaction_time (user speech only)
     # ----------------------------------------------------------

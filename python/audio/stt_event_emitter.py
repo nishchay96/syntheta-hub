@@ -9,6 +9,7 @@ class STTEventEmitter:
     def __init__(self, host='127.0.0.1', port=9001):
         self.host = host
         self.port = port
+        self._warned_unavailable = False
 
     def emit(self, event_type, sat_id, payload):
         data = {
@@ -31,8 +32,12 @@ class STTEventEmitter:
                 logger.debug(f"Sent Event: {event_type} -> Sat {sat_id}")
                 
         except ConnectionRefusedError:
-            logger.error(f"Failed to emit '{event_type}': Go Hub (Port {self.port}) refused connection. Is it running?")
+            if not self._warned_unavailable:
+                logger.warning(f"Go Hub unavailable on port {self.port}; skipping emitted audio events.")
+                self._warned_unavailable = True
         except socket.timeout:
-            logger.error(f"Failed to emit '{event_type}': Connection to Go Hub timed out.")
+            if not self._warned_unavailable:
+                logger.warning(f"Go Hub on port {self.port} timed out; skipping emitted audio events.")
+                self._warned_unavailable = True
         except Exception as e:
-            logger.error(f"Error emitting '{event_type}': {e}")
+            logger.debug(f"Emitter skipped '{event_type}': {e}")

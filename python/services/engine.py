@@ -170,6 +170,11 @@ class SynthetaEngine:
     def _direct_live_failure_reply(self, text: str, packet: dict) -> str | None:
         if not packet.get("live_lookup_failed"):
             return None
+            
+        # 🟢 FIX: If personal memory is involved, DO NOT hard fail. Let the LLM answer using memory.
+        if packet.get("matched_memory_node") or packet.get("needs_memory"):
+            return None
+            
         query = packet.get("failed_web_query") or text
         return f"I couldn't fetch live current data for '{query}' right now because web retrieval is unavailable. Please try again later."
 
@@ -250,9 +255,10 @@ class SynthetaEngine:
                 # 🟢 FIX: Increased timeout from 0.2s to 1.0s to allow the matrix payload to pass
                 timeout=1.0 
             )
+        except requests.RequestException as e:
+            logger.debug(f"WebUI broadcast skipped: {e}")
         except Exception as e:
-            # 🟢 FIX: Added temporary error logging so we don't fail silently
-            logger.error(f"⚠️ WebUI Broadcast Failed: {e}")    
+            logger.warning(f"⚠️ WebUI broadcast unexpected failure: {e}")
     def _play_boot_sound(self):
         boot_wav = os.path.join(
             os.path.dirname(__file__), '../../assets/system/boot.wav')
@@ -645,7 +651,8 @@ class SynthetaEngine:
 
     def _looks_like_location_reply(self, text: str) -> bool:
         normalized = re.sub(r"\s+", " ", text.lower()).strip(" ?.!," )
-        if not normalized or len(normalized.split()) > 6:
+        parts = normalized.split()
+        if not normalized or len(parts) > 3:
             return False
         if normalized in {"what", "so what is the aqi", "so what is the weather", "weather", "aqi"}:
             return False
@@ -656,6 +663,8 @@ class SynthetaEngine:
         if re.fullmatch(r"(?:near|around)\s+(?:me|here)", normalized):
             return False
         if re.search(r"\b(?:weather|aqi|forecast|rain|temperature|news|price|stock|bitcoin)\b", normalized):
+            return False
+        if len(parts) == 3 and all(len(part) > 5 for part in parts):
             return False
         return re.fullmatch(r"[a-zA-Z][a-zA-Z\s.\-]{1,60}", normalized) is not None
 
@@ -824,14 +833,17 @@ class SynthetaEngine:
         # --- CASE B: Loading Identification ---
         if load_name:
             if not self._looks_like_person_name(load_name):
-                self._speak(sat_id, "I need an actual person name before I load or create a profile.")
-                return
-            id_name = self._canonicalize_profile_name(load_name)
-            if self.nightwatchman.capture.user_exists(id_name):
-                self._activate_profile(sat_id, id_name, is_new=False)
+                if awaiting_identity:
+                    self._speak(sat_id, "I need an actual person name before I load or create a profile.")
+                    return
+                # If not awaiting identity, it's just a conversational phrase (e.g. "this is cool"). Fall through.
             else:
-                self._queue_profile_creation(sat_id, id_name)
-            return
+                id_name = self._canonicalize_profile_name(load_name)
+                if self.nightwatchman.capture.user_exists(id_name):
+                    self._activate_profile(sat_id, id_name, is_new=False)
+                else:
+                    self._queue_profile_creation(sat_id, id_name)
+                return
 
         # --- CASE D: Confirmation Response ---
         if is_waiting_confirm and pending_name:
@@ -992,7 +1004,7 @@ class SynthetaEngine:
         print("-" * 60)
         print(f"ACTIVE USER: {active_user}")
         print(f"ROUTE:       {packet.get('route_taken')}")
-        print(f"MEMORY_CTX:\n{memory_ctx or '(empty)'}")
+        print(f"MEMORY_CTX:\n{packet.get('memory_context') or '(empty)'}")
         print(f"MEMORY_TANK:\n{packet.get('memory_tank') or '(empty)'}")
         print(f"HISTORY:\n{packet.get('history')}")
         print("=" * 60 + "\n")
