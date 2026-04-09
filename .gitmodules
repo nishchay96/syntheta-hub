@@ -1,0 +1,3 @@
+[submodule "cloned_websearch"]
+	path = cloned_websearch
+	url = https://github.com/CORE-MFG/websearch
